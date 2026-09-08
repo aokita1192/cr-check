@@ -153,7 +153,7 @@ SERVICES: dict[str, dict] = {
         "reg_url": "https://docs.google.com/spreadsheets/d/1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs/edit?gid=0#gid=0",
     },
 }
-MANUAL_PDF_URL = "https://drive.google.com/drive/folders/12NEh7ojyw4qBVTNedeaouZk85Y1EVKBQ"
+MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8NVx/view?usp=drive_link"
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
 INPUT_PRICE_PER_1M_USD = 3.00
