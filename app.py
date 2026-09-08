@@ -837,10 +837,6 @@ with st.sidebar:
                 '<p style="color:#64748B;font-size:0.8rem;">詳しい操作方法は配布済みの <strong style="color:#CBD5E1;">操作マニュアル（PDF）</strong> をご確認ください。</p>',
                 unsafe_allow_html=True,
             )
-        st.markdown(
-            '<p style="color:#64748B;font-size:0.8rem;margin-top:0.5rem;">ご不明な点は <code>aokita@mota.inc</code> までご連絡ください。</p>',
-            unsafe_allow_html=True,
-        )
 
 # ─── タブ定義（管理者は3タブ、一般は直接表示） ──────────────────────────────
 if is_admin:
@@ -1049,9 +1045,14 @@ with tab_main:
             </p>
             """, unsafe_allow_html=True)
 
+            def _truncate(text: str, n: int = 80) -> str:
+                t = text.strip()
+                return (t[:n] + "…") if len(t) > n else t
+
             feedback_base_df = pd.DataFrame({
                 "#": list(range(1, total + 1)),
-                "セリフ（抜粋）": [(s[:45] + "…") if len(s) > 45 else s for s in serif_list],
+                "判定": ["OK" if is_ok(r) else "要修正" for r in result_list],
+                "審査結果（抜粋）": [_truncate(r) for r in result_list],
                 "担当者フィードバック": [""] * total,
             })
             edited_feedback: pd.DataFrame = st.data_editor(
@@ -1059,12 +1060,15 @@ with tab_main:
                 key=f"feedback_editor_{selected_service}",
                 column_config={
                     "#": st.column_config.NumberColumn("#", width="small", disabled=True),
-                    "セリフ（抜粋）": st.column_config.TextColumn("セリフ（抜粋）", width="medium", disabled=True),
-                    "担当者フィードバック": st.column_config.TextColumn("担当者フィードバック", width="large",
-                                                                        help="AIが見落とした点・判断が誤りな点・追加指示を自由に記入"),
+                    "判定": st.column_config.TextColumn("判定", width="small", disabled=True),
+                    "審査結果（抜粋）": st.column_config.TextColumn("審査結果（抜粋）", width="large", disabled=True),
+                    "担当者フィードバック": st.column_config.TextColumn(
+                        "担当者フィードバック", width="large",
+                        help="AIの判断が誤り・不足の場合に記入。次回以降の審査に反映されます。",
+                    ),
                 },
                 use_container_width=True,
-                height=min(120 + total * 40, 400),
+                height=min(120 + total * 50, 500),
                 hide_index=True,
             )
 
