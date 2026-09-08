@@ -153,7 +153,7 @@ SERVICES: dict[str, dict] = {
         "reg_url": "https://docs.google.com/spreadsheets/d/1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs/edit?gid=0#gid=0",
     },
 }
-MANUAL_PDF_URL = ""  # 操作マニュアルPDFのURLをここに設定（Google DriveなどのリンクをコピーしてURLに貼り付け）
+MANUAL_PDF_URL = "https://drive.google.com/drive/folders/12NEh7ojyw4qBVTNedeaouZk85Y1EVKBQ"
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
 INPUT_PRICE_PER_1M_USD = 3.00
@@ -873,6 +873,16 @@ with tab_main:
     if selected_service != st.session_state.current_service:
         st.session_state.current_service = selected_service
 
+    reg_url = SERVICES[selected_service].get("reg_url", "")
+    if reg_url:
+        st.markdown(
+            f'<a href="{reg_url}" target="_blank" style="'
+            'font-size:0.8rem;color:#3B82F6;text-decoration:none;font-weight:500;'
+            'display:inline-flex;align-items:center;gap:0.3em;margin-top:0.25rem;'
+            '">📋 レギュレーションを確認する →</a>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
     # サービス確定後にサイドバーの動的部分を追加
@@ -884,12 +894,6 @@ with tab_main:
             if selected_service in st.session_state.prompt_sections:
                 st.session_state.prompt_sections[selected_service].pop("審査基準", None)
             st.rerun()
-        reg_url = SERVICES[selected_service].get("reg_url", "")
-        if reg_url:
-            st.markdown(
-                f'<a href="{reg_url}" target="_blank" class="sidebar-link">📋 レギュレーションを確認する</a>',
-                unsafe_allow_html=True,
-            )
         if FEEDBACK_ENABLED:
             fb_count = len(load_user_feedback(selected_service, user_email))
             st.markdown(
