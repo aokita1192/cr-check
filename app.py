@@ -112,6 +112,23 @@ hr { border-color: #E2E8F0 !important; margin: 1.25rem 0 !important; }
 .login-title { color: #0F172A !important; font-size: 1.5rem !important; font-weight: 700 !important; margin: 0 0 0.5rem !important; }
 .login-sub { color: #64748B; font-size: 0.875rem; margin: 0 0 1.5rem; }
 
+[data-testid="stTextInput"] > div > div {
+    border: 2px solid #CBD5E1 !important;
+    border-radius: 10px !important;
+    background: white !important;
+}
+[data-testid="stTextInput"] > div > div:focus-within {
+    border-color: #3B82F6 !important;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.15) !important;
+}
+[data-testid="stTextInput"] input {
+    font-size: 0.95rem !important;
+    color: #0F172A !important;
+}
+.login-input-label { font-size: 0.82rem; font-weight: 600; color: #374151; text-align: left; margin-bottom: 0.25rem; margin-top: 0.5rem; }
+.sidebar-link { display: block; color: #93C5FD !important; font-size: 0.82rem; text-decoration: none; padding: 0.4rem 0; }
+.sidebar-link:hover { color: #BFDBFE !important; text-decoration: underline; }
+
 .user-badge { background: #0F172A; border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
 .user-badge-label { font-size: 0.68rem; color: #475569; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .user-badge-email { font-size: 0.82rem; color: #CBD5E1; font-weight: 500; word-break: break-all; margin-top: 0.2rem; }
@@ -125,9 +142,18 @@ hr { border-color: #E2E8F0 !important; margin: 1.25rem 0 !important; }
 
 # ─── 定数 ────────────────────────────────────────────────────────────────────
 SERVICES: dict[str, dict] = {
-    "🏠 引越し": {"sheet_id": "1qUy2FJ9YA1XULzEEzDrQoLMhLpwg0wDd3_WfNHhYzxM", "sheet_gid": "1861068633"},
-    "🚗 車買取": {"sheet_id": "1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs", "sheet_gid": "0"},
+    "🏠 引越し": {
+        "sheet_id": "1qUy2FJ9YA1XULzEEzDrQoLMhLpwg0wDd3_WfNHhYzxM",
+        "sheet_gid": "1861068633",
+        "reg_url": "https://docs.google.com/spreadsheets/d/1qUy2FJ9YA1XULzEEzDrQoLMhLpwg0wDd3_WfNHhYzxM/edit?gid=1861068633#gid=1861068633",
+    },
+    "🚗 車買取": {
+        "sheet_id": "1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs",
+        "sheet_gid": "0",
+        "reg_url": "https://docs.google.com/spreadsheets/d/1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs/edit?gid=0#gid=0",
+    },
 }
+MANUAL_PDF_URL = ""  # 操作マニュアルPDFのURLをここに設定（Google DriveなどのリンクをコピーしてURLに貼り付け）
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
 INPUT_PRICE_PER_1M_USD = 3.00
@@ -435,7 +461,8 @@ def show_login_page() -> None:
             <p class="login-sub">メールアドレスを入力してご利用ください</p>
         </div>
         """, unsafe_allow_html=True)
-        email_input = st.text_input("", placeholder="your@mota.inc", label_visibility="collapsed", key="login_email_input")
+        st.markdown('<p class="login-input-label">メールアドレス</p>', unsafe_allow_html=True)
+        email_input = st.text_input("メールアドレス", placeholder="your@mota.inc", label_visibility="collapsed", key="login_email_input")
         if st.button("ログイン →", type="primary", use_container_width=True):
             email = email_input.strip()
             allowed = get_allowed_emails()
@@ -589,7 +616,16 @@ def show_admin_dashboard() -> None:
     st.markdown("<div style='margin-bottom:1rem;'><span style='font-size:1.3rem;font-weight:700;color:#0F172A;'>📊 利用状況ダッシュボード</span></div>", unsafe_allow_html=True)
 
     if not FEEDBACK_ENABLED:
-        st.info("Google Sheets 連携が未設定のため、利用ログを表示できません。")
+        missing = []
+        if not _GSPREAD_AVAILABLE:
+            missing.append("`gspread` ライブラリが未インストール（requirements.txt を確認）")
+        else:
+            if "gcp_service_account" not in st.secrets:
+                missing.append("Streamlit Secrets に `[gcp_service_account]` が未設定")
+            if "feedback_sheet" not in st.secrets:
+                missing.append("Streamlit Secrets に `[feedback_sheet]` が未設定")
+        items = "\n".join(f"・{m}" for m in missing) if missing else "・原因不明"
+        st.warning(f"Google Sheets 連携が未設定のため、利用ログを表示できません。\n\n**未設定項目：**\n{items}")
         return
 
     col_refresh, col_note = st.columns([1, 4])
@@ -791,11 +827,20 @@ with st.sidebar:
     st.markdown("<h1 style='margin-bottom:0.25rem;'>⚙️ 設定</h1>", unsafe_allow_html=True)
 
     with st.expander("📖 使い方", expanded=False):
-        st.markdown("""
-詳しい操作方法は配布済みの **操作マニュアル（PDF）** をご確認ください。
-
-ご不明な点は `aokita@mota.inc` までご連絡ください。
-""")
+        if MANUAL_PDF_URL:
+            st.markdown(
+                f'<a href="{MANUAL_PDF_URL}" target="_blank" class="sidebar-link">📄 操作マニュアル（PDF）を開く</a>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<p style="color:#64748B;font-size:0.8rem;">詳しい操作方法は配布済みの <strong style="color:#CBD5E1;">操作マニュアル（PDF）</strong> をご確認ください。</p>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            '<p style="color:#64748B;font-size:0.8rem;margin-top:0.5rem;">ご不明な点は <code>aokita@mota.inc</code> までご連絡ください。</p>',
+            unsafe_allow_html=True,
+        )
 
 # ─── タブ定義（管理者は3タブ、一般は直接表示） ──────────────────────────────
 if is_admin:
@@ -839,6 +884,12 @@ with tab_main:
             if selected_service in st.session_state.prompt_sections:
                 st.session_state.prompt_sections[selected_service].pop("審査基準", None)
             st.rerun()
+        reg_url = SERVICES[selected_service].get("reg_url", "")
+        if reg_url:
+            st.markdown(
+                f'<a href="{reg_url}" target="_blank" class="sidebar-link">📋 レギュレーションを確認する</a>',
+                unsafe_allow_html=True,
+            )
         if FEEDBACK_ENABLED:
             fb_count = len(load_user_feedback(selected_service, user_email))
             st.markdown(
