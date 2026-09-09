@@ -907,12 +907,88 @@ with tab_main:
     # ─── 台本入力テーブル ─────────────────────────────────────────────────────
     st.markdown("<h2 style='margin-bottom:0.75rem;'>📋 台本入力</h2>", unsafe_allow_html=True)
 
-    empty_df = pd.DataFrame({"セリフ": [""] * 10, "注釈": [""] * 10})
+    # サービスごとにエディタ状態を管理
+    _base_key = f"editor_base_df_{selected_service}"
+    _key_idx  = f"editor_key_idx_{selected_service}"
+    _prev_key = f"editor_prev_df_{selected_service}"
+    if _base_key not in st.session_state:
+        st.session_state[_base_key] = pd.DataFrame({"セリフ": [""] * 10, "注釈": [""] * 10})
+    if _key_idx not in st.session_state:
+        st.session_state[_key_idx] = 0
+    if _prev_key not in st.session_state:
+        st.session_state[_prev_key] = None
+
+    # 一括貼り付けエリア
+    with st.expander("📥 一括貼り付け（全セリフをまとめて入力）", expanded=False):
+        st.markdown(
+            "<p style='color:#64748B;font-size:0.82rem;margin-bottom:0.5rem;'>"
+            "台本テキストをそのまま貼り付けてください。改行ごとに1行ずつ分割します。"
+            "　※〜 の行は直前のセリフの注釈に自動割り当て。【〜・PR・# 始まりの行はスキップします。"
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        bulk_text = st.text_area(
+            "bulk",
+            height=220,
+            placeholder="ここに台本テキストを貼り付け…",
+            label_visibility="collapsed",
+            key=f"bulk_paste_{selected_service}",
+        )
+        _c1, _c2, _c3 = st.columns([1.3, 1, 3])
+        with _c1:
+            _import_clicked = st.button(
+                "📋 分割して取り込む", type="primary",
+                use_container_width=True, key="btn_bulk_import",
+            )
+        with _c2:
+            _undo_clicked = st.button(
+                "↩️ 元に戻す",
+                use_container_width=True,
+                disabled=(st.session_state[_prev_key] is None),
+                key="btn_bulk_undo",
+            )
+
+        if _import_clicked:
+            if bulk_text.strip():
+                _skip_prefixes = ("【", "PR", "#")
+                _rows: list[dict] = []
+                for raw in bulk_text.splitlines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    if any(line.startswith(p) for p in _skip_prefixes):
+                        continue
+                    if line.startswith("※"):
+                        if _rows and not _rows[-1]["注釈"]:
+                            _rows[-1]["注釈"] = line
+                        continue
+                    _rows.append({"セリフ": line, "注釈": ""})
+                if _rows:
+                    st.session_state[_prev_key] = st.session_state[_base_key].copy()
+                    while len(_rows) < 10:
+                        _rows.append({"セリフ": "", "注釈": ""})
+                    st.session_state[_base_key] = pd.DataFrame(_rows)
+                    st.session_state[_key_idx] += 1
+                    _serif_count = sum(1 for r in _rows if r["セリフ"])
+                    st.success(f"✅ {_serif_count}件のセリフを取り込みました。")
+                    st.rerun()
+                else:
+                    st.warning("取り込めるセリフが見つかりませんでした。")
+            else:
+                st.warning("テキストを貼り付けてください。")
+
+        if _undo_clicked:
+            st.session_state[_base_key] = st.session_state[_prev_key]
+            st.session_state[_prev_key] = None
+            st.session_state[_key_idx] += 1
+            st.rerun()
+
     edited_df: pd.DataFrame = st.data_editor(
-        empty_df,
+        st.session_state[_base_key],
         num_rows="dynamic",
         use_container_width=True,
         height=430,
+        key=f"data_editor_{selected_service}_{st.session_state[_key_idx]}",
         column_config={
             "セリフ": st.column_config.TextColumn("セリフ", help="チェックしたいセリフを入力", width="large"),
             "注釈": st.column_config.TextColumn("注釈", help="補足情報（任意）", width="medium"),
