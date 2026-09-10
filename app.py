@@ -141,9 +141,11 @@ hr { border-color: #E2E8F0 !important; margin: 1.25rem 0 !important; }
 
 .copy-btn { background: none; border: 1px solid #E2E8F0; border-radius: 4px; padding: 0.12em 0.55em; cursor: pointer; font-size: 0.72rem; color: #94A3B8; float: right; margin-left: 0.5rem; line-height: 1.5; transition: all 0.15s; white-space: nowrap; }
 .copy-btn:hover { background: #EFF6FF; color: #3B82F6; border-color: #93C5FD; }
-.ag-cell { white-space: normal !important; word-break: break-word !important; line-height: 1.6 !important; }
-.ag-cell-value { white-space: normal !important; word-break: break-word !important; }
-.ag-row { min-height: 48px !important; }
+.ag-cell { white-space: pre-wrap !important; word-break: break-word !important; line-height: 1.6 !important; overflow: visible !important; }
+.ag-cell-value { white-space: pre-wrap !important; word-break: break-word !important; overflow: visible !important; }
+.ag-row { min-height: 80px !important; overflow: visible !important; }
+.ag-center-cols-container .ag-row { height: auto !important; }
+.ag-cell-wrapper { height: auto !important; align-items: flex-start !important; padding-top: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1251,7 +1253,7 @@ document.addEventListener('click',function(e){{
                     ),
                 },
                 use_container_width=True,
-                height=min(120 + total * 55, 550),
+                height=min(140 + total * 90, 700),
                 hide_index=True,
             )
 
