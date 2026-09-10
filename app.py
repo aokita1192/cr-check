@@ -1,4 +1,4 @@
-import time
+import concurrent.futures
 from datetime import datetime
 
 import anthropic
@@ -138,10 +138,11 @@ hr { border-color: #E2E8F0 !important; margin: 1.25rem 0 !important; }
 .section-label { font-size: 0.72rem; font-weight: 700; color: #64748B; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem; }
 .section-auto-badge { display: inline-block; background: #F0FDF4; color: #15803D; font-size: 0.65rem; font-weight: 600; padding: 0.1em 0.5em; border-radius: 999px; margin-left: 0.4rem; vertical-align: middle; }
 
-.copy-btn { background: none; border: 1px solid #E2E8F0; border-radius: 4px; padding: 0.12em 0.45em; cursor: pointer; font-size: 0.72rem; color: #94A3B8; float: right; margin-left: 0.5rem; line-height: 1.5; }
+.copy-btn { background: none; border: 1px solid #E2E8F0; border-radius: 4px; padding: 0.12em 0.55em; cursor: pointer; font-size: 0.72rem; color: #94A3B8; float: right; margin-left: 0.5rem; line-height: 1.5; transition: all 0.15s; white-space: nowrap; }
 .copy-btn:hover { background: #EFF6FF; color: #3B82F6; border-color: #93C5FD; }
-[data-testid="stDataEditor"] .ag-cell { white-space: pre-wrap !important; word-break: break-word !important; }
-[data-testid="stDataEditor"] .ag-cell-value { white-space: pre-wrap !important; }
+.ag-cell { white-space: normal !important; word-break: break-word !important; line-height: 1.6 !important; }
+.ag-cell-value { white-space: normal !important; word-break: break-word !important; }
+.ag-row { min-height: 48px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1066,33 +1067,43 @@ with tab_main:
         total_input_tokens: int = 0
         total_output_tokens: int = 0
 
+        # 全セリフの入力を事前準備（メインスレッドで実行）
+        all_items: list[tuple] = []
+        for _, row in valid_df.iterrows():
+            serif = str(row["セリフ"]).strip()
+            chusyaku_raw = row["注釈"]
+            chusyaku = str(chusyaku_raw).strip() if pd.notna(chusyaku_raw) and str(chusyaku_raw).strip() else ""
+            script_text = f"{serif}\n\n【注釈】\n{chusyaku}" if chusyaku else serif
+            relevant_fb = find_relevant_feedback(past_feedback, serif)
+            augmented_prompt = augment_prompt_with_feedback(base_system_prompt, relevant_fb)
+            all_items.append((serif, chusyaku, augmented_prompt, script_text))
+
+        def _call_api(args: tuple) -> tuple:
+            _serif, _chusyaku, _prompt, _text = args
+            try:
+                _result, _in, _out = check_script(client, _prompt, _text)
+            except Exception as e:
+                _result, _in, _out = f"[APIエラー: {e}]", 0, 0
+            return _serif, _chusyaku, _result, _in, _out
+
         progress_bar = st.progress(0, text=f"処理中... 0/{total}件")
+        ordered: list[tuple | None] = [None] * total
 
         with st.spinner("AIがチェック中です..."):
-            for idx, (_, row) in enumerate(valid_df.iterrows()):
-                serif = str(row["セリフ"]).strip()
-                chusyaku_raw = row["注釈"]
-                chusyaku = str(chusyaku_raw).strip() if pd.notna(chusyaku_raw) and str(chusyaku_raw).strip() else ""
-                script_text = f"{serif}\n\n【注釈】\n{chusyaku}" if chusyaku else serif
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                future_map = {executor.submit(_call_api, item): i for i, item in enumerate(all_items)}
+                completed = 0
+                for future in concurrent.futures.as_completed(future_map):
+                    ordered[future_map[future]] = future.result()
+                    completed += 1
+                    progress_bar.progress(completed / total, text=f"処理中... {completed}/{total}件")
 
-                progress_bar.progress((idx + 1) / total, text=f"処理中... {idx + 1}/{total}件")
-
-                relevant_fb = find_relevant_feedback(past_feedback, serif)
-                augmented_prompt = augment_prompt_with_feedback(base_system_prompt, relevant_fb)
-
-                try:
-                    result, in_tok, out_tok = check_script(client, augmented_prompt, script_text)
-                    total_input_tokens += in_tok
-                    total_output_tokens += out_tok
-                except anthropic.APIError as e:
-                    result = f"[APIエラー: {e}]"
-
-                serif_list.append(serif)
-                chusyaku_list.append(chusyaku)
-                result_list.append(result)
-
-                if idx < total - 1:
-                    time.sleep(1)
+        for serif, chusyaku, result, in_tok, out_tok in ordered:  # type: ignore[misc]
+            serif_list.append(serif)
+            chusyaku_list.append(chusyaku)
+            result_list.append(result)
+            total_input_tokens += in_tok
+            total_output_tokens += out_tok
 
         progress_bar.progress(1.0, text="✅ 完了!")
 
@@ -1130,7 +1141,22 @@ with tab_main:
         """, unsafe_allow_html=True)
 
         st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
-        _copy_js = "navigator.clipboard.writeText(this.dataset.t);var b=this;b.textContent='✓';setTimeout(function(){b.textContent='📋'},1500)"
+        _copy_js = (
+            "var b=this,t=b.dataset.t;"
+            "if(navigator.clipboard){"
+            "  navigator.clipboard.writeText(t).then(function(){"
+            "    b.textContent='✅ コピーしました';"
+            "    b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
+            "    setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000)"
+            "  })"
+            "}else{"
+            "  var ta=document.createElement('textarea');ta.value=t;"
+            "  document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);"
+            "  b.textContent='✅ コピーしました';"
+            "  b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
+            "  setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000)"
+            "}"
+        )
         rows_html = "".join(
             f"<tr>"
             f"<td class='cell cell-status'><span class='badge {'badge-ok' if is_ok(r) else 'badge-ng'}'>{'OK' if is_ok(r) else '要修正'}</span></td>"
