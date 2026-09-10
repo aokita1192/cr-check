@@ -4,6 +4,7 @@ from datetime import datetime
 import anthropic
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     import gspread
@@ -1148,40 +1149,69 @@ with tab_main:
         """, unsafe_allow_html=True)
 
         st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
-        _copy_js = (
-            "var b=this,t=b.dataset.t;"
-            "function _done(){"
-            "b.textContent='✅ コピーしました';"
-            "b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
-            "setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000);}"
-            "function _fb(){"
-            "var ta=document.createElement('textarea');ta.value=t;"
-            "ta.style.cssText='position:fixed;left:-9999px;top:-9999px;opacity:0;';"
-            "document.body.appendChild(ta);ta.focus();ta.select();"
-            "try{document.execCommand('copy');}catch(e){}"
-            "document.body.removeChild(ta);_done();}"
-            "if(navigator.clipboard&&navigator.clipboard.writeText){"
-            "navigator.clipboard.writeText(t).then(_done,_fb);"
-            "}else{_fb();}"
-        )
         rows_html = "".join(
             f"<tr>"
             f"<td class='cell cell-status'><span class='badge {'badge-ok' if is_ok(r) else 'badge-ng'}'>{'OK' if is_ok(r) else '要修正'}</span></td>"
             f"<td class='cell cell-serif'>{_esc(s)}</td>"
             f"<td class='cell cell-note'>{_esc(c)}</td>"
             f"<td class='cell cell-result'>"
-            f"<button class='copy-btn' data-t=\"{_esc_attr(r)}\" onclick=\"{_copy_js}\">📋</button>"
+            f"<button class='copy-btn' data-t=\"{_esc_attr(r)}\">📋</button>"
             f"{_esc(r)}"
             f"</td>"
             f"</tr>"
             for s, c, r in zip(serif_list, chusyaku_list, result_list)
         )
-        st.markdown(
-            f"""<table class="result-table">
-                <thead><tr><th>判定</th><th>セリフ</th><th>注釈</th><th>チェック結果</th></tr></thead>
-                <tbody>{rows_html}</tbody>
-            </table>""",
-            unsafe_allow_html=True,
+        est_height = max(300, len(result_list) * 130 + 80)
+        components.html(
+            f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
+table{{width:100%;border-collapse:collapse;font-size:13.5px;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.07);}}
+th{{background:#F8FAFC;padding:11px 14px;border-bottom:2px solid #E2E8F0;text-align:left;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:#64748B;}}
+tr{{border-bottom:1px solid #F1F5F9;transition:background .1s;}}
+tr:last-child{{border-bottom:none;}}
+tr:hover{{background:#FAFBFF;}}
+.cell{{padding:12px 14px;vertical-align:top;white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#374151;}}
+.cell-status{{width:6%;text-align:center;}}
+.cell-serif{{width:24%;}}
+.cell-note{{width:10%;color:#6B7280;font-size:.85em;}}
+.cell-result{{width:60%;}}
+.badge{{display:inline-block;padding:.25em .65em;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.03em;white-space:nowrap;}}
+.badge-ok{{background:#DCFCE7;color:#15803D;}}
+.badge-ng{{background:#FEF3C7;color:#B45309;}}
+.copy-btn{{background:none;border:1px solid #E2E8F0;border-radius:4px;padding:.12em .55em;cursor:pointer;font-size:.72rem;color:#94A3B8;float:right;margin-left:.5rem;line-height:1.5;transition:all .15s;white-space:nowrap;}}
+.copy-btn:hover{{background:#EFF6FF;color:#3B82F6;border-color:#93C5FD;}}
+</style>
+</head><body>
+<table>
+<thead><tr><th>判定</th><th>セリフ</th><th>注釈</th><th>チェック結果</th></tr></thead>
+<tbody>{rows_html}</tbody>
+</table>
+<script>
+document.addEventListener('click',function(e){{
+  var btn=e.target;
+  if(!btn.classList.contains('copy-btn'))return;
+  var t=btn.dataset.t;
+  function done(){{
+    btn.textContent='✅ コピーしました';
+    btn.style.background='#DCFCE7';btn.style.color='#15803D';btn.style.borderColor='#86EFAC';
+    setTimeout(function(){{btn.textContent='📋';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},2000);
+  }}
+  function fb(){{
+    var ta=document.createElement('textarea');
+    ta.value=t;ta.style.cssText='position:fixed;left:-9999px;';
+    document.body.appendChild(ta);ta.focus();ta.select();
+    try{{document.execCommand('copy');}}catch(ex){{}}
+    document.body.removeChild(ta);done();
+  }}
+  var cb=(window.parent&&window.parent.navigator&&window.parent.navigator.clipboard)||navigator.clipboard;
+  if(cb&&cb.writeText){{cb.writeText(t).then(done,fb);}}else{{fb();}}
+}});
+</script>
+</body></html>""",
+            height=est_height,
+            scrolling=True,
         )
 
         # ─── フィードバック入力 ──────────────────────────────────────────────
