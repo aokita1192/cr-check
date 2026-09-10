@@ -612,12 +612,19 @@ def augment_prompt_with_feedback(base_prompt: str, feedback_list: list[dict]) ->
 def check_script(client: anthropic.Anthropic, system_prompt: str, script_text: str) -> tuple[str, int, int]:
     message = client.messages.create(
         model=MODEL_NAME,
-        max_tokens=2000,
+        max_tokens=16000,
         system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": script_text}],
     )
     parts = [b.text for b in message.content if hasattr(b, "text")]
-    text = "\n".join(parts) if parts else "[レスポンスなし]"
+    stop = getattr(message, "stop_reason", "?")
+    if parts:
+        text = "\n".join(parts)
+        if stop == "max_tokens":
+            text += "\n[⚠️ 出力が上限に達しました]"
+    else:
+        content_types = [type(b).__name__ for b in message.content]
+        text = f"[レスポンスなし|stop:{stop}|blocks:{content_types}]"
     in_tok = message.usage.input_tokens if hasattr(message, "usage") else 0
     out_tok = message.usage.output_tokens if hasattr(message, "usage") else 0
     return text, in_tok, out_tok
@@ -1090,7 +1097,7 @@ with tab_main:
         ordered: list[tuple | None] = [None] * total
 
         with st.spinner("AIがチェック中です..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 future_map = {executor.submit(_call_api, item): i for i, item in enumerate(all_items)}
                 completed = 0
                 for future in concurrent.futures.as_completed(future_map):
@@ -1143,19 +1150,19 @@ with tab_main:
         st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
         _copy_js = (
             "var b=this,t=b.dataset.t;"
-            "if(navigator.clipboard){"
-            "  navigator.clipboard.writeText(t).then(function(){"
-            "    b.textContent='✅ コピーしました';"
-            "    b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
-            "    setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000)"
-            "  })"
-            "}else{"
-            "  var ta=document.createElement('textarea');ta.value=t;"
-            "  document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);"
-            "  b.textContent='✅ コピーしました';"
-            "  b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
-            "  setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000)"
-            "}"
+            "function _done(){"
+            "b.textContent='✅ コピーしました';"
+            "b.style.background='#DCFCE7';b.style.color='#15803D';b.style.borderColor='#86EFAC';"
+            "setTimeout(function(){b.textContent='📋';b.style.background='';b.style.color='';b.style.borderColor='';},2000);}"
+            "function _fb(){"
+            "var ta=document.createElement('textarea');ta.value=t;"
+            "ta.style.cssText='position:fixed;left:-9999px;top:-9999px;opacity:0;';"
+            "document.body.appendChild(ta);ta.focus();ta.select();"
+            "try{document.execCommand('copy');}catch(e){}"
+            "document.body.removeChild(ta);_done();}"
+            "if(navigator.clipboard&&navigator.clipboard.writeText){"
+            "navigator.clipboard.writeText(t).then(_done,_fb);"
+            "}else{_fb();}"
         )
         rows_html = "".join(
             f"<tr>"
