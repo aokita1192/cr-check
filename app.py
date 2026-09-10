@@ -612,8 +612,8 @@ def augment_prompt_with_feedback(base_prompt: str, feedback_list: list[dict]) ->
 def check_script(client: anthropic.Anthropic, system_prompt: str, script_text: str) -> tuple[str, int, int]:
     message = client.messages.create(
         model=MODEL_NAME,
-        max_tokens=16000,
-        system=system_prompt,
+        max_tokens=2000,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": script_text}],
     )
     parts = [b.text for b in message.content if hasattr(b, "text")]
@@ -1090,7 +1090,7 @@ with tab_main:
         ordered: list[tuple | None] = [None] * total
 
         with st.spinner("AIがチェック中です..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 future_map = {executor.submit(_call_api, item): i for i, item in enumerate(all_items)}
                 completed = 0
                 for future in concurrent.futures.as_completed(future_map):
