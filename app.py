@@ -137,6 +137,11 @@ hr { border-color: #E2E8F0 !important; margin: 1.25rem 0 !important; }
 
 .section-label { font-size: 0.72rem; font-weight: 700; color: #64748B; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem; }
 .section-auto-badge { display: inline-block; background: #F0FDF4; color: #15803D; font-size: 0.65rem; font-weight: 600; padding: 0.1em 0.5em; border-radius: 999px; margin-left: 0.4rem; vertical-align: middle; }
+
+.copy-btn { background: none; border: 1px solid #E2E8F0; border-radius: 4px; padding: 0.12em 0.45em; cursor: pointer; font-size: 0.72rem; color: #94A3B8; float: right; margin-left: 0.5rem; line-height: 1.5; }
+.copy-btn:hover { background: #EFF6FF; color: #3B82F6; border-color: #93C5FD; }
+[data-testid="stDataEditor"] .ag-cell { white-space: pre-wrap !important; word-break: break-word !important; }
+[data-testid="stDataEditor"] .ag-cell-value { white-space: pre-wrap !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -194,7 +199,14 @@ F 事実整合型：実際のサービス仕様と食い違っていないかを
 
 <誤字脱字チェック>
 レギュレーション審査に加えて、台本内の明らかな誤字・脱字も指摘します（例：「あおのサービス」→「あのサービス」）。引越し・車買取どちらのサービスにも適用します。
-</誤字脱字チェック>\
+</誤字脱字チェック>
+
+<表現明瞭性チェック>
+広告コピーとして意味が伝わらない不明瞭な表現も指摘します。
+・サービスの内容を示す動詞が省略されており何をするのかわからない表現（例：「やってもらう」→ 引越しをしてもらう・査定してもらう 等）
+・何を競合・比較しているのかが読み手に伝わらない表現（例：「取り合う」→ 見積もり価格で競い合う 等）
+代替案は、省略された情報を補い、読み手が一読して意味を理解できる表現に置き換えます。引越し・車買取どちらのサービスにも適用します。
+</表現明瞭性チェック>\
 """
 
 _HOSOKU_引越し = """\
@@ -618,6 +630,16 @@ def _esc(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
 
 
+def _esc_attr(text: str) -> str:
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "&#10;")
+            .replace("\r", ""))
+
+
 # ─── 管理者ダッシュボード ─────────────────────────────────────────────────────
 def show_admin_dashboard() -> None:
     st.markdown("<div style='margin-bottom:1rem;'><span style='font-size:1.3rem;font-weight:700;color:#0F172A;'>📊 利用状況ダッシュボード</span></div>", unsafe_allow_html=True)
@@ -996,7 +1018,16 @@ with tab_main:
     )
 
     st.divider()
-    run_button = st.button("🚀 AIチェックを実行", type="primary")
+    _btn_col, _reset_col, _ = st.columns([2, 1.5, 3])
+    with _btn_col:
+        run_button = st.button("🚀 AIチェックを実行", type="primary", use_container_width=True)
+    with _reset_col:
+        if st.button("🗑️ セリフをすべてリセット", use_container_width=True, key="btn_reset_all"):
+            st.session_state[_base_key] = pd.DataFrame({"セリフ": [""] * 10, "注釈": [""] * 10})
+            st.session_state[_prev_key] = None
+            st.session_state[_key_idx] += 1
+            st.session_state.pop("audit_results", None)
+            st.rerun()
 
     # ─── 審査実行 ─────────────────────────────────────────────────────────────
     if run_button:
@@ -1037,7 +1068,7 @@ with tab_main:
 
         progress_bar = st.progress(0, text=f"処理中... 0/{total}件")
 
-        with st.spinner("AIが審査中です..."):
+        with st.spinner("AIがチェック中です..."):
             for idx, (_, row) in enumerate(valid_df.iterrows()):
                 serif = str(row["セリフ"]).strip()
                 chusyaku_raw = row["注釈"]
@@ -1098,19 +1129,23 @@ with tab_main:
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ 審査結果</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
+        _copy_js = "navigator.clipboard.writeText(this.dataset.t);var b=this;b.textContent='✓';setTimeout(function(){b.textContent='📋'},1500)"
         rows_html = "".join(
             f"<tr>"
             f"<td class='cell cell-status'><span class='badge {'badge-ok' if is_ok(r) else 'badge-ng'}'>{'OK' if is_ok(r) else '要修正'}</span></td>"
             f"<td class='cell cell-serif'>{_esc(s)}</td>"
             f"<td class='cell cell-note'>{_esc(c)}</td>"
-            f"<td class='cell cell-result'>{_esc(r)}</td>"
+            f"<td class='cell cell-result'>"
+            f"<button class='copy-btn' data-t=\"{_esc_attr(r)}\" onclick=\"{_copy_js}\">📋</button>"
+            f"{_esc(r)}"
+            f"</td>"
             f"</tr>"
             for s, c, r in zip(serif_list, chusyaku_list, result_list)
         )
         st.markdown(
             f"""<table class="result-table">
-                <thead><tr><th>判定</th><th>セリフ</th><th>注釈</th><th>審査結果</th></tr></thead>
+                <thead><tr><th>判定</th><th>セリフ</th><th>注釈</th><th>チェック結果</th></tr></thead>
                 <tbody>{rows_html}</tbody>
             </table>""",
             unsafe_allow_html=True,
@@ -1128,30 +1163,32 @@ with tab_main:
             </p>
             """, unsafe_allow_html=True)
 
-            def _truncate(text: str, n: int = 80) -> str:
+            def _trunc(text: str, n: int) -> str:
                 t = text.strip()
                 return (t[:n] + "…") if len(t) > n else t
 
             feedback_base_df = pd.DataFrame({
-                "#": list(range(1, total + 1)),
+                "No.": list(range(1, total + 1)),
                 "判定": ["OK" if is_ok(r) else "要修正" for r in result_list],
-                "審査結果（抜粋）": [_truncate(r) for r in result_list],
+                "セリフ": [_trunc(s, 40) for s in serif_list],
+                "チェック結果": [_trunc(r, 120) for r in result_list],
                 "担当者フィードバック": [""] * total,
             })
             edited_feedback: pd.DataFrame = st.data_editor(
                 feedback_base_df,
                 key=f"feedback_editor_{selected_service}",
                 column_config={
-                    "#": st.column_config.NumberColumn("#", width="small", disabled=True),
+                    "No.": st.column_config.NumberColumn("No.", width="small", disabled=True),
                     "判定": st.column_config.TextColumn("判定", width="small", disabled=True),
-                    "審査結果（抜粋）": st.column_config.TextColumn("審査結果（抜粋）", width="large", disabled=True),
+                    "セリフ": st.column_config.TextColumn("セリフ", width="medium", disabled=True),
+                    "チェック結果": st.column_config.TextColumn("チェック結果", width="large", disabled=True),
                     "担当者フィードバック": st.column_config.TextColumn(
                         "担当者フィードバック", width="large",
                         help="AIの判断が誤り・不足の場合に記入。次回以降の審査に反映されます。",
                     ),
                 },
                 use_container_width=True,
-                height=min(120 + total * 50, 500),
+                height=min(120 + total * 55, 550),
                 hide_index=True,
             )
 
