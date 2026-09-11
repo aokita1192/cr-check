@@ -1,10 +1,20 @@
 import concurrent.futures
 from datetime import datetime
+import re
 
 import anthropic
 import pandas as pd
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:
+    from bs4 import BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+_URL_PATTERN = re.compile(r'https?://[^\s　、。，．「-』〜・！？《》〈〉]+')
 
 try:
     import gspread
@@ -574,6 +584,39 @@ def get_assessment_cases(csv_url: str) -> str:
     return "\n".join(lines)
 
 
+# ─── URL参照コンテンツ取得 ───────────────────────────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_url_text(url: str) -> str:
+    """URLのページ本文を取得してテキスト化する（30分キャッシュ）。"""
+    if not _BS4_AVAILABLE:
+        return ""
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # 余分な空行を圧縮し最大3000文字に制限
+        lines = [l for l in text.splitlines() if l.strip()]
+        return "\n".join(lines)[:3000]
+    except Exception:
+        return ""
+
+
+def extract_url_contexts(serif: str) -> str:
+    """セリフ中のURLを検出し、参照コンテンツを取得して付記テキストを返す。"""
+    urls = _URL_PATTERN.findall(serif)
+    if not urls:
+        return ""
+    contexts: list[str] = []
+    for url in urls[:2]:  # 最大2URL
+        content = fetch_url_text(url)
+        if content:
+            contexts.append(f"【参照URL: {url}】\n{content}")
+    return ("\n\n" + "\n\n".join(contexts)) if contexts else ""
+
+
 # ─── プロンプトセクション管理 ─────────────────────────────────────────────────
 def _init_prompt_sections(service_key: str, rules: str) -> None:
     """セッション状態にサービスのプロンプトセクションを初期化する。"""
@@ -1124,6 +1167,10 @@ with tab_main:
             chusyaku_raw = row["注釈"]
             chusyaku = str(chusyaku_raw).strip() if pd.notna(chusyaku_raw) and str(chusyaku_raw).strip() else ""
             script_text = f"{serif}\n\n【注釈】\n{chusyaku}" if chusyaku else serif
+            # セリフ中のURLを検出して参照コンテンツを付加
+            url_ctx = extract_url_contexts(serif)
+            if url_ctx:
+                script_text += url_ctx
             relevant_fb = find_relevant_feedback(past_feedback, serif)
             augmented_prompt = augment_prompt_with_feedback(base_system_prompt, relevant_fb)
             all_items.append((serif, chusyaku, augmented_prompt, script_text))
