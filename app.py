@@ -159,6 +159,7 @@ SERVICES: dict[str, dict] = {
     "🚗 車買取": {
         "sheet_id": "1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs",
         "sheet_gid": "0",
+        "cases_gid": "933212905",
         "reg_url": "https://docs.google.com/spreadsheets/d/1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs/edit?gid=0#gid=0",
     },
 }
@@ -365,6 +366,14 @@ def sheet_csv_url(service_key: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{s['sheet_id']}/export?format=csv&gid={s['sheet_gid']}"
 
 
+def cases_csv_url(service_key: str) -> str | None:
+    s = SERVICES[service_key]
+    gid = s.get("cases_gid")
+    if not gid:
+        return None
+    return f"https://docs.google.com/spreadsheets/d/{s['sheet_id']}/export?format=csv&gid={gid}"
+
+
 def calc_cost_usd(input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * INPUT_PRICE_PER_1M_USD + output_tokens * OUTPUT_PRICE_PER_1M_USD) / 1_000_000
 
@@ -544,6 +553,25 @@ def get_regulations(csv_url: str) -> str:
         lines.append(block)
 
     return "\n---\n".join(lines)
+
+
+@st.cache_data(ttl=3600)
+def get_assessment_cases(csv_url: str) -> str:
+    """査定事例タブを読み込み、プロンプト挿入用のテキストに変換する。"""
+    try:
+        df = pd.read_csv(csv_url, dtype=str)
+    except Exception as e:
+        st.warning(f"⚠️ 査定事例の取得に失敗しました（{e}）。")
+        return ""
+
+    df = df.dropna(how="all").fillna("")
+    lines: list[str] = []
+    for _, row in df.iterrows():
+        vals = [str(v).strip() for v in row.values if str(v).strip() and str(v).strip().lower() != "nan"]
+        if vals:
+            lines.append(" | ".join(vals))
+
+    return "\n".join(lines)
 
 
 # ─── プロンプトセクション管理 ─────────────────────────────────────────────────
@@ -1068,6 +1096,18 @@ with tab_main:
         rules = get_regulations(sheet_csv_url(selected_service))
         sections = get_prompt_sections(selected_service, rules)
         base_system_prompt = assemble_prompt(sections)
+
+        # 車買取のみ：査定事例タブをプロンプトに付加
+        _cases_url = cases_csv_url(selected_service)
+        if _cases_url:
+            _cases_text = get_assessment_cases(_cases_url)
+            if _cases_text:
+                base_system_prompt += (
+                    "\n\n<査定事例>\n"
+                    "以下は過去の査定事例です。各セリフの判定時に参考にしてください。\n"
+                    f"{_cases_text}\n"
+                    "</査定事例>"
+                )
 
         past_feedback = load_user_feedback(selected_service, user_email)
 
