@@ -1050,8 +1050,8 @@ with tab_main:
         if valid_df.empty:
             st.warning("⚠️ セリフが入力されていません。")
             st.stop()
-        if len(valid_df) > 50:
-            st.error("⚠️ 一度に処理できるのは最大50行です。")
+        if len(valid_df) > 100:
+            st.error("⚠️ 一度に処理できるのは最大100行です。")
             st.stop()
 
         total = len(valid_df)
