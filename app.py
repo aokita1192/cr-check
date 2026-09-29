@@ -167,10 +167,14 @@ SERVICES: dict[str, dict] = {
         "reg_url": "https://docs.google.com/spreadsheets/d/1qUy2FJ9YA1XULzEEzDrQoLMhLpwg0wDd3_WfNHhYzxM/edit?gid=1861068633#gid=1861068633",
     },
     "🚗 車買取": {
-        "sheet_id": "1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs",
+        "sheet_id": "1fEFmeeEVk2jeL3Z3MnZZ82ixaPVSDSXaTP60LDakZjY",
         "sheet_gid": "0",
-        "cases_gid": "933212905",
-        "reg_url": "https://docs.google.com/spreadsheets/d/1LqLCjKd8UgQgXNVn-DDfAIEeHVwJTUbmDY7OkZVojcs/edit?gid=0#gid=0",
+        "extra_tabs": [
+            {"gid": "541691112",  "label": "エビデンス"},
+            {"gid": "1274815939", "label": "査定実績（基本）"},
+            {"gid": "1915590926", "label": "査定実績（各社入札額）"},
+        ],
+        "reg_url": "https://docs.google.com/spreadsheets/d/1fEFmeeEVk2jeL3Z3MnZZ82ixaPVSDSXaTP60LDakZjY/edit?gid=0#gid=0",
     },
 }
 MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8NVx/view?usp=drive_link"
@@ -376,12 +380,14 @@ def sheet_csv_url(service_key: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{s['sheet_id']}/export?format=csv&gid={s['sheet_gid']}"
 
 
-def cases_csv_url(service_key: str) -> str | None:
+def extra_tab_urls(service_key: str) -> list[tuple[str, str]]:
+    """追加タブの (label, csv_url) リストを返す。"""
     s = SERVICES[service_key]
-    gid = s.get("cases_gid")
-    if not gid:
-        return None
-    return f"https://docs.google.com/spreadsheets/d/{s['sheet_id']}/export?format=csv&gid={gid}"
+    sid = s["sheet_id"]
+    return [
+        (tab["label"], f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={tab['gid']}")
+        for tab in s.get("extra_tabs", [])
+    ]
 
 
 def calc_cost_usd(input_tokens: int, output_tokens: int) -> float:
@@ -1140,16 +1146,15 @@ with tab_main:
         sections = get_prompt_sections(selected_service, rules)
         base_system_prompt = assemble_prompt(sections)
 
-        # 車買取のみ：査定事例タブをプロンプトに付加
-        _cases_url = cases_csv_url(selected_service)
-        if _cases_url:
-            _cases_text = get_assessment_cases(_cases_url)
-            if _cases_text:
+        # 追加タブ（エビデンス・査定実績等）をプロンプトに付加
+        for _label, _tab_url in extra_tab_urls(selected_service):
+            _tab_text = get_assessment_cases(_tab_url)
+            if _tab_text:
                 base_system_prompt += (
-                    "\n\n<査定事例>\n"
-                    "以下は過去の査定事例です。各セリフの判定時に参考にしてください。\n"
-                    f"{_cases_text}\n"
-                    "</査定事例>"
+                    f"\n\n<{_label}>\n"
+                    f"以下は「{_label}」の参照データです。各セリフの判定時に活用してください。\n"
+                    f"{_tab_text}\n"
+                    f"</{_label}>"
                 )
 
         past_feedback = load_user_feedback(selected_service, user_email)
