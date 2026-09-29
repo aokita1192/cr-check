@@ -809,8 +809,8 @@ def show_admin_dashboard() -> None:
     chart_col, _ = st.columns([3, 1])
     with chart_col:
         st.bar_chart(
-            daily.set_index("日付")[["入力Token", "出力Token"]],
-            color=["#93C5FD", "#6EE7B7"],
+            daily.set_index("日付")[["コスト_円"]],
+            color=["#6EE7B7"],
             height=220,
         )
 
