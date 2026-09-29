@@ -788,6 +788,38 @@ def show_admin_dashboard() -> None:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── 日別消費量 ────────────────────────────────────────────────────────────
+    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>📅 日別消費量</h2>", unsafe_allow_html=True)
+    daily = (
+        df.assign(日付=df["timestamp"].dt.date)
+        .groupby("日付")
+        .agg(
+            審査回数=("row_count", "count"),
+            セリフ数=("row_count", "sum"),
+            入力Token=("input_tokens", "sum"),
+            出力Token=("output_tokens", "sum"),
+            コスト_USD=("cost_usd", "sum"),
+        )
+        .reset_index()
+        .sort_values("日付")
+    )
+    daily["コスト_円"] = (daily["コスト_USD"] * 150).round(0).astype(int)
+    daily["日付"] = daily["日付"].astype(str)
+
+    chart_col, _ = st.columns([3, 1])
+    with chart_col:
+        st.bar_chart(
+            daily.set_index("日付")[["入力Token", "出力Token"]],
+            color=["#93C5FD", "#6EE7B7"],
+            height=220,
+        )
+
+    display_daily = daily.rename(columns={"コスト_USD": "コスト(USD)", "コスト_円": "コスト(円)"})[
+        ["日付", "審査回数", "セリフ数", "入力Token", "出力Token", "コスト(USD)", "コスト(円)"]
+    ].copy()
+    display_daily["コスト(USD)"] = display_daily["コスト(USD)"].round(4)
+    st.dataframe(display_daily, use_container_width=True, hide_index=True)
+
     st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>👤 ユーザー別利用状況</h2>", unsafe_allow_html=True)
     user_summary = (
         df.groupby("user_email")
