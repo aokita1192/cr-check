@@ -778,6 +778,7 @@ def show_admin_dashboard() -> None:
     total_audits = len(df)
     total_rows = int(df["row_count"].sum())
     total_cost_usd = df["cost_usd"].sum()
+    avg_cost_jpy = (total_cost_usd / total_audits * 150) if total_audits > 0 else 0
 
     st.markdown(f"""
     <div class="kpi-row">
@@ -785,6 +786,7 @@ def show_admin_dashboard() -> None:
       <div class="kpi-card ok"><div class="kpi-label">審査実行回数</div><div class="kpi-value">{total_audits}</div><div class="kpi-sub">回</div></div>
       <div class="kpi-card ng"><div class="kpi-label">セリフ審査総数</div><div class="kpi-value">{total_rows:,}</div><div class="kpi-sub">件</div></div>
       <div class="kpi-card purple"><div class="kpi-label">推定コスト合計</div><div class="kpi-value">${total_cost_usd:.2f}</div><div class="kpi-sub">USD（¥{total_cost_usd*150:.0f}相当）</div></div>
+      <div class="kpi-card total"><div class="kpi-label">1回あたり平均コスト</div><div class="kpi-value">¥{avg_cost_jpy:.1f}</div><div class="kpi-sub">({total_cost_usd/total_audits*100:.2f}¢ USD)</div></div>
     </div>
     """, unsafe_allow_html=True)
 
