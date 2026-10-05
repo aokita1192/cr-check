@@ -935,7 +935,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                   {annotationError && <p className="text-red-400 text-sm">{annotationError}</p>}
 
                   {!annotationResult && !annotationError && (
-                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内の注釈テキストサイズを判定します（合格基準：動画 21〜23px）</p>
+                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内の注釈テキストサイズを判定します（合格基準：動画 16〜20px）</p>
                   )}
 
                   {annotationResult && (() => {
@@ -976,12 +976,12 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                                   <div className="flex items-center justify-between">
                                     <span className="text-zinc-500 text-xs">合格ライン</span>
                                     <span className="text-xs font-mono text-zinc-400">
-                                      {a.min_pt}〜{a.max_pt}pt（動画 21〜23px）
+                                      {a.min_pt}〜{a.max_pt}pt（動画 16〜20px）
                                     </span>
                                   </div>
                                   {!isPass && a.estimated_px > 0 && (
-                                    <div className={`mt-1.5 px-2 py-1 rounded text-xs ${a.estimated_px < 21 ? 'bg-red-950/50 text-red-300' : 'bg-orange-950/50 text-orange-300'}`}>
-                                      {a.estimated_px < 21
+                                    <div className={`mt-1.5 px-2 py-1 rounded text-xs ${a.estimated_px < 16 ? 'bg-red-950/50 text-red-300' : 'bg-orange-950/50 text-orange-300'}`}>
+                                      {a.estimated_px < 16
                                         ? `→ 編集ソフトで ${a.min_pt}〜${a.max_pt}pt に引き上げてください`
                                         : '→ 注釈以外の要素を誤検出している可能性があります'}
                                     </div>
