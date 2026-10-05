@@ -180,6 +180,7 @@ SERVICES: dict[str, dict] = {
 MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8NVx/view?usp=drive_link"
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
+PROMPT_VERSION = "v4"  # 上げると全ユーザーのセッションキャッシュをリセット
 INPUT_PRICE_PER_1M_USD = 3.00
 OUTPUT_PRICE_PER_1M_USD = 15.00
 
@@ -296,51 +297,32 @@ _OUTPUT_SECTION = """\
 <出力仕様>
 基準違反が無く、誤字脱字も無い場合：「問題なし」という4文字のみを出力します。句読点・記号・改行・その他の語は一切付けません。
 
-指摘がある場合：下記の形式のブロックを、台本に登場する順に並べます。ブロックとブロックの間は空行1行だけ空けます。
+指摘がある場合：下記の形式で、台本に登場する順に1行ずつ並べます。
 
 形式1（レギュレーション違反・誤字脱字の指摘）
-▼修正箇所：
-（台本から一字一句そのまま引用）
-▼理由：
-（理由を20〜50文字程度で簡潔に記載。ルール番号は書かない）
-▼代替案または追記案：
-（言い換え案または注釈案。複数ある場合は1行ずつ改行して列挙）
+「（審査対象のセリフから一字一句引用） → （代替案1）または（代替案2）（理由を30文字以内で）」
 
 形式2（<判定補足> の「台本テキストだけでは判定できない事項」に該当しうる記述があった場合）
-▼要確認：
-（原文引用）（確認が必要な内容を簡潔に記載）
+▼要確認：（原文引用）（確認が必要な内容を簡潔に記載）
 
-出力の1文字目は必ず「▼」または「問」です。
-使用してよい記号は ▼ 「」 （） ※ のみです。見出し記号(#)、強調(**)、箇条書き記号(- * ■ ・)、表(|)、コードブロックは使用しません。
+<文体について>
+硬くて機械的な表現（「〜のため修正が必要です」「〜が確認されました」等）は避け、担当者が自然に受け取れる、簡潔でわかりやすい言葉で書いてください。理由は短く・率直に書きます。
+</文体について>
+
+入力テキストは必ず台本のセリフです。短くても文脈が断片的でも、「台本が入力されていません」等のエラーメッセージは出力しません。
+出力の1文字目は必ず「「」（鍵括弧）または「問」または「▼」です。
+見出し記号(#)、強調(**)、箇条書き記号(- * ■ ・)、表(|)、コードブロックは使用しません。
 挨拶、前置き、審査の宣言、総合判定、件数の集計、まとめ、「以上」などの締めの言葉は書きません。
 「NG」という言葉は相手に不快感を与える可能性があるため、理由の説明においても一切使用しないでください。
 </出力仕様>
 
 <出力例1：レギュレーション違反の指摘がある場合>
-▼修正箇所：
-一番安く引越しできる方法を紹介します
-▼理由：
-比較対象の範囲を限定する語句を伴わない最上級表現のため修正が必要です。
-▼代替案または追記案：
-比較した中で1番安い見積もりがわかる方法を紹介します
-お得に引越しする見積もりの方法を紹介します
-
-▼修正箇所：
-電話ラッシュなし
-▼理由：
-否定の対象範囲を限定する語句も注釈もないまま電話がないと表現しているため修正が必要です。
-▼代替案または追記案：
-数十社からの電話ラッシュなし
-電話ラッシュなし※厳選3社からお電話またはメールはあります。
+「一番安く引越しできる方法を紹介します → 比較した中で1番安い見積もりがわかる方法を紹介しますまたはお得に引越しする見積もりの方法を紹介します（比較範囲を限定しない最上級表現）」
+「電話ラッシュなし → 数十社からの電話ラッシュなしまたは電話ラッシュなし※厳選3社からお電話またはメールはあります。（電話がない旨を限定なく表現している）」
 </出力例1>
 
 <出力例2：誤字脱字の指摘>
-▼修正箇所：
-あおのサービス
-▼理由：
-誤字・脱字のため修正が必要です。
-▼代替案または追記案：
-あのサービス
+「はれし → ハレシーまたはHALESEE（誤字・脱字）」
 </出力例2>
 
 <出力例3：指摘がない場合>
@@ -350,7 +332,7 @@ _OUTPUT_SECTION = """\
 <最終確認>
 出力を書き出す前に、次の5点を確認します。
 ・基準外の指摘が混ざっていないか（誤字脱字の指摘は例外として可）
-・引用が台本の原文と一字一句一致しているか
+・引用が審査対象のセリフの原文と一字一句一致しているか
 ・代替案・追記案が審査基準に違反していないか
 ・「NG」という語が含まれていないか
 ・出力仕様以外の文字（前置き・まとめ・マークダウン記法）が含まれていないか
@@ -626,6 +608,10 @@ def extract_url_contexts(serif: str) -> str:
 # ─── プロンプトセクション管理 ─────────────────────────────────────────────────
 def _init_prompt_sections(service_key: str, rules: str) -> None:
     """セッション状態にサービスのプロンプトセクションを初期化する。"""
+    # バージョンが変わったらキャッシュをリセット
+    if st.session_state.get("prompt_version") != PROMPT_VERSION:
+        st.session_state.pop("prompt_sections", None)
+        st.session_state["prompt_version"] = PROMPT_VERSION
     if "prompt_sections" not in st.session_state:
         st.session_state.prompt_sections = {}
     if service_key not in st.session_state.prompt_sections:
@@ -1200,12 +1186,24 @@ with tab_main:
         total_output_tokens: int = 0
 
         # 全セリフの入力を事前準備（メインスレッドで実行）
+        all_serifs = [str(r["セリフ"]).strip() for _, r in valid_df.iterrows()]
         all_items: list[tuple] = []
-        for _, row in valid_df.iterrows():
-            serif = str(row["セリフ"]).strip()
+        for i, (_, row) in enumerate(valid_df.iterrows()):
+            serif = all_serifs[i]
             chusyaku_raw = row["注釈"]
             chusyaku = str(chusyaku_raw).strip() if pd.notna(chusyaku_raw) and str(chusyaku_raw).strip() else ""
-            script_text = f"{serif}\n\n【注釈】\n{chusyaku}" if chusyaku else serif
+
+            # 前後セリフを文脈として付加（前後1件ずつ）
+            ctx_parts: list[str] = []
+            if i > 0:
+                ctx_parts.append(f"【前のセリフ（文脈参照のみ・審査対象外）】\n{all_serifs[i-1]}")
+            ctx_parts.append(f"【審査対象のセリフ】\n{serif}")
+            if i < len(all_serifs) - 1:
+                ctx_parts.append(f"【次のセリフ（文脈参照のみ・審査対象外）】\n{all_serifs[i+1]}")
+            script_text = "\n\n".join(ctx_parts)
+            if chusyaku:
+                script_text += f"\n\n【注釈】\n{chusyaku}"
+
             # セリフ中のURLを検出して参照コンテンツを付加
             url_ctx = extract_url_contexts(serif)
             if url_ctx:
