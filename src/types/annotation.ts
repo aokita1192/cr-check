@@ -4,6 +4,7 @@ export type AnnotationCheckResult = {
   estimated_px: number
   estimated_pt: number
   min_pt: number
+  max_pt: number
   status: '合格' | '不合格' | '検出不可'
   reason: string
 }

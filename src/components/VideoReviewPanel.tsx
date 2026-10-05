@@ -935,7 +935,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                   {annotationError && <p className="text-red-400 text-sm">{annotationError}</p>}
 
                   {!annotationResult && !annotationError && (
-                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内の注釈テキストサイズを判定します（基準：動画40px以上）</p>
+                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内の注釈テキストサイズを判定します（合格基準：動画 21〜23px）</p>
                   )}
 
                   {annotationResult && (() => {
@@ -970,18 +970,20 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                                   <div className="flex items-center justify-between mb-1">
                                     <span className="text-zinc-400 text-xs font-medium">推定フォントサイズ</span>
                                     <span className={`text-sm font-mono font-bold ${isPass ? 'text-green-400' : 'text-red-400'}`}>
-                                      約 {a.estimated_pt}pt
+                                      約 {a.estimated_pt}pt（{a.estimated_px}px）
                                     </span>
                                   </div>
                                   <div className="flex items-center justify-between">
                                     <span className="text-zinc-500 text-xs">合格ライン</span>
                                     <span className="text-xs font-mono text-zinc-400">
-                                      {a.min_pt ?? 40}pt以上（動画 40px以上）
+                                      {a.min_pt}〜{a.max_pt}pt（動画 21〜23px）
                                     </span>
                                   </div>
-                                  {!isPass && a.min_pt && (
-                                    <div className="mt-1.5 px-2 py-1 bg-red-950/50 rounded text-xs text-red-300">
-                                      → 編集ソフトで最低 <span className="font-bold text-red-200">{a.min_pt}pt</span> 以上に設定してください
+                                  {!isPass && a.estimated_px > 0 && (
+                                    <div className={`mt-1.5 px-2 py-1 rounded text-xs ${a.estimated_px < 21 ? 'bg-red-950/50 text-red-300' : 'bg-orange-950/50 text-orange-300'}`}>
+                                      {a.estimated_px < 21
+                                        ? `→ 編集ソフトで ${a.min_pt}〜${a.max_pt}pt に引き上げてください`
+                                        : '→ 注釈以外の要素を誤検出している可能性があります'}
                                     </div>
                                   )}
                                 </div>
