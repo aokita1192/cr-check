@@ -180,7 +180,7 @@ SERVICES: dict[str, dict] = {
 MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8NVx/view?usp=drive_link"
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
-PROMPT_VERSION = "v4"  # 上げると全ユーザーのセッションキャッシュをリセット
+PROMPT_VERSION = "v5"  # 上げると全ユーザーのセッションキャッシュをリセット
 INPUT_PRICE_PER_1M_USD = 3.00
 OUTPUT_PRICE_PER_1M_USD = 15.00
 
@@ -226,7 +226,16 @@ F 事実整合型：実際のサービス仕様と食い違っていないかを
 ・サービスの内容を示す動詞が省略されており何をするのかわからない表現（例：「やってもらう」→ 引越しをしてもらう・査定してもらう 等）
 ・何を競合・比較しているのかが読み手に伝わらない表現（例：「取り合う」→ 見積もり価格で競い合う 等）
 代替案は、省略された情報を補い、読み手が一読して意味を理解できる表現に置き換えます。引越し・車買取どちらのサービスにも適用します。
-</表現明瞭性チェック>\
+</表現明瞭性チェック>
+
+<エビデンス整合性チェック>
+セリフまたは注釈にURLが記載されており、【参照URL】として内容が提供されている場合、その内容を用いて以下を判定します。
+
+・セリフ内の数値・事実・主張が参照URLの記述と整合しているかを確認します
+・「めちゃくちゃ高い」「爆上がり」「激増」等の強調表現が、URLのデータで妥当な範囲に収まるか判断します。データが強調を裏付けている場合は指摘しません。データに対して過度に誇張されている場合は指摘します
+・セリフの主張と参照URLの内容が食い違う場合は形式1で指摘します
+・参照URLの内容が取得できていない（【参照URL】ブロックがない）場合は、この観点での判定は行いません
+</エビデンス整合性チェック>\
 """
 
 _HOSOKU_引越し = """\
@@ -575,30 +584,50 @@ def get_assessment_cases(csv_url: str) -> str:
 # ─── URL参照コンテンツ取得 ───────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_url_text(url: str) -> str:
-    """URLのページ本文を取得してテキスト化する（30分キャッシュ）。"""
-    if not _BS4_AVAILABLE:
-        return ""
+    """URLのページ/PDF本文を取得してテキスト化する（30分キャッシュ）。"""
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "").lower()
+
+        # PDF の場合
+        if "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf"):
+            try:
+                import io
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(resp.content))
+                pages_text = "\n".join(
+                    page.extract_text() or "" for page in reader.pages[:8]
+                )
+                lines = [l for l in pages_text.splitlines() if l.strip()]
+                return "\n".join(lines)[:4000]
+            except Exception:
+                return ""
+
+        # HTML の場合
+        if not _BS4_AVAILABLE:
+            return ""
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
-        # 余分な空行を圧縮し最大3000文字に制限
         lines = [l for l in text.splitlines() if l.strip()]
         return "\n".join(lines)[:3000]
     except Exception:
         return ""
 
 
-def extract_url_contexts(serif: str) -> str:
-    """セリフ中のURLを検出し、参照コンテンツを取得して付記テキストを返す。"""
-    urls = _URL_PATTERN.findall(serif)
+def extract_url_contexts(serif: str, annotation: str = "") -> str:
+    """セリフ・注釈中のURLを検出し、参照コンテンツを付記テキストで返す。"""
+    combined = serif + " " + annotation
+    seen: dict[str, None] = {}
+    for u in _URL_PATTERN.findall(combined):
+        seen[u] = None  # 重複排除・順序保持
+    urls = list(seen.keys())
     if not urls:
         return ""
     contexts: list[str] = []
-    for url in urls[:2]:  # 最大2URL
+    for url in urls[:3]:  # 最大3URL
         content = fetch_url_text(url)
         if content:
             contexts.append(f"【参照URL: {url}】\n{content}")
@@ -1204,8 +1233,8 @@ with tab_main:
             if chusyaku:
                 script_text += f"\n\n【注釈】\n{chusyaku}"
 
-            # セリフ中のURLを検出して参照コンテンツを付加
-            url_ctx = extract_url_contexts(serif)
+            # セリフ・注釈中のURLを検出して参照コンテンツを付加
+            url_ctx = extract_url_contexts(serif, chusyaku)
             if url_ctx:
                 script_text += url_ctx
             relevant_fb = find_relevant_feedback(past_feedback, serif)
