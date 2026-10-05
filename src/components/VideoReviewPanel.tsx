@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import type { Comment } from '@/lib/supabase'
 import type { DetectResult } from '@/app/api/detect-car/route'
 import type { EvidenceCheckResult } from '@/app/api/check-evidence/route'
-import type { AnnotationCheckResult } from '@/app/api/check-annotation/route'
+import type { AnnotationCheckResult } from '@/types/annotation'
 import UserMenu from '@/components/UserMenu'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -5,15 +5,8 @@ import { logUsage } from '@/lib/log-usage'
 
 const anthropic = new Anthropic()
 
-export type AnnotationCheckResult = {
-  text_found: string
-  video_format: '縦型' | '横型黒帯' | '横型'
-  estimated_px: number
-  estimated_pt: number  // 動画編集ソフト（Premiere Pro等）でのフォントサイズ推定値（pt）
-  min_pt: number        // 合格に必要な最低pt
-  status: '合格' | '不合格' | '検出不可'
-  reason: string
-}
+import type { AnnotationCheckResult } from '@/types/annotation'
+export type { AnnotationCheckResult }
 
 function extractBase64(dataUrl: string) {
   return {
