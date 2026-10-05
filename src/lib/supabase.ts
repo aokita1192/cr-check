@@ -16,5 +16,6 @@ export type Comment = {
   project_id: string
   time_sec: number
   content: string
+  author_email: string | null
   created_at: string
 }

@@ -52,6 +52,11 @@ function getDriveEmbedUrl(url: string): string {
   return match ? `https://drive.google.com/file/d/${match[1]}/preview` : url
 }
 
+function authorName(email: string | null | undefined): string {
+  if (!email) return ''
+  return email.split('@')[0]
+}
+
 function formatTime(sec: number) {
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
@@ -949,19 +954,38 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                               <div className={`px-3 py-2 border-b border-zinc-700 flex items-center gap-2 ${
                                 isPass ? 'bg-green-950/40' : isUnknown ? 'bg-zinc-800' : 'bg-red-950/40'
                               }`}>
-                                <span className={`text-sm font-bold ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-400' : 'text-red-400'}`}>
-                                  {isPass ? '○' : isUnknown ? '—' : '✗'}
+                                <span className={`text-base font-bold ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-400' : 'text-red-400'}`}>
+                                  {isPass ? '○ 合格' : isUnknown ? '— 検出不可' : '✗ 不合格'}
                                 </span>
-                                <span className="text-zinc-300 text-xs flex-1 truncate">{a.text_found || '（テキスト検出不可）'}</span>
-                                <span className="text-xs text-zinc-500 shrink-0">{a.video_format}</span>
+                                <span className="text-xs text-zinc-500 ml-auto shrink-0">{a.video_format}</span>
                               </div>
-                              <div className={`px-3 py-2 border-b border-zinc-800 flex items-center justify-between`}>
-                                <span className="text-zinc-500 text-xs">推定サイズ</span>
-                                <span className={`text-xs font-mono font-bold ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-500' : 'text-red-400'}`}>
-                                  {a.estimated_px > 0 ? `${a.estimated_px}px` : '—'}
-                                  {a.estimated_px > 0 && <span className="text-zinc-600 font-normal ml-1">（基準: 40px）</span>}
-                                </span>
-                              </div>
+                              {a.text_found && (
+                                <div className="px-3 py-1.5 border-b border-zinc-800">
+                                  <span className="text-zinc-500 text-xs">検出テキスト：</span>
+                                  <span className="text-zinc-300 text-xs ml-1">{a.text_found}</span>
+                                </div>
+                              )}
+                              {a.estimated_pt > 0 && (
+                                <div className="px-3 py-2 border-b border-zinc-800">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-zinc-400 text-xs font-medium">推定フォントサイズ</span>
+                                    <span className={`text-sm font-mono font-bold ${isPass ? 'text-green-400' : 'text-red-400'}`}>
+                                      約 {a.estimated_pt}pt
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-zinc-500 text-xs">合格ライン</span>
+                                    <span className="text-xs font-mono text-zinc-400">
+                                      {a.min_pt ?? 40}pt以上（動画 40px以上）
+                                    </span>
+                                  </div>
+                                  {!isPass && a.min_pt && (
+                                    <div className="mt-1.5 px-2 py-1 bg-red-950/50 rounded text-xs text-red-300">
+                                      → 編集ソフトで最低 <span className="font-bold text-red-200">{a.min_pt}pt</span> 以上に設定してください
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                               <div className={`px-3 py-1.5 ${isPass ? 'bg-green-950/30' : isUnknown ? 'bg-zinc-800/50' : 'bg-red-950/30'}`}>
                                 <p className={`text-xs ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-500' : 'text-red-400'}`}>{a.reason}</p>
                               </div>
@@ -1035,6 +1059,11 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                             {formatTime(c.time_sec)}
                           </span>
                           {region && <span className="text-xs text-zinc-600" title="範囲指定あり">▣</span>}
+                          {authorName(c.author_email) && (
+                            <span className="text-xs text-zinc-500 bg-zinc-700 px-1.5 py-0.5 rounded">
+                              {authorName(c.author_email)}
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
@@ -1091,6 +1120,11 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                             <div className="flex items-center gap-1.5">
                               <Reply className="w-3 h-3 text-zinc-600" />
                               <span className="text-xs font-mono text-zinc-500">{formatTime(r.time_sec)}</span>
+                              {authorName(r.author_email) && (
+                                <span className="text-xs text-zinc-600 bg-zinc-700/60 px-1.5 py-0.5 rounded">
+                                  {authorName(r.author_email)}
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button onClick={e => handleCopyComment(e, r)} className="p-1 rounded hover:bg-zinc-600" title="コピー">

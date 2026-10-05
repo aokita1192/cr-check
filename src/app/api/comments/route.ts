@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
+import { verifyToken } from '@/lib/auth-token'
 
 export async function GET(request: NextRequest) {
   const projectId = request.nextUrl.searchParams.get('project_id')
@@ -18,6 +19,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const token = request.cookies.get('auth_token')?.value
+  const authPayload = token ? await verifyToken(token) : null
+  const author_email = authPayload?.email ?? null
+
   const body = await request.json()
   const { project_id, time_sec, content } = body
 
@@ -27,7 +32,7 @@ export async function POST(request: NextRequest) {
 
   const { data, error } = await supabase
     .from('comments')
-    .insert({ project_id, time_sec, content })
+    .insert({ project_id, time_sec, content, author_email })
     .select()
     .single()
 
