@@ -171,9 +171,8 @@ SERVICES: dict[str, dict] = {
         "sheet_gid": "0",
         "extra_tabs": [
             {"gid": "541691112",  "label": "エビデンス"},
-            {"gid": "1274815939", "label": "査定実績（基本）"},
-            {"gid": "1915590926", "label": "査定実績（各社入札額）"},
         ],
+        "vehicle_assessment_tab": {"gid": "1274815939", "label": "査定実績（基本）"},
         "reg_url": "https://docs.google.com/spreadsheets/d/1fEFmeeEVk2jeL3Z3MnZZ82ixaPVSDSXaTP60LDakZjY/edit?gid=0#gid=0",
     },
 }
@@ -681,6 +680,53 @@ def get_assessment_cases(csv_url: str) -> str:
         if vals:
             lines.append(" | ".join(vals))
 
+    return "\n".join(lines)
+
+
+@st.cache_data(ttl=3600)
+def get_assessment_df(csv_url: str) -> "pd.DataFrame | None":
+    """査定実績（基本）CSVをDataFrameとして返す（車両絞り込み用）。"""
+    try:
+        df = pd.read_csv(csv_url, dtype=str)
+        return df.dropna(how="all").fillna("")
+    except Exception as e:
+        st.warning(f"⚠️ 査定実績の取得に失敗しました（{e}）。")
+        return None
+
+
+def extract_vehicle_info(text: str) -> dict[str, str]:
+    """セリフ・注釈テキストからメーカー・車種・年式を抽出する。"""
+    info: dict[str, str] = {}
+    # 年式: 4桁年 + "年式" or "年"
+    m = re.search(r"(20\d{2}|19\d{2})年(?:式)?", text)
+    if m:
+        info["年式"] = m.group(1)
+    # 「※メーカー　車種　年式…」パターン（全角スペース区切り）
+    m2 = re.search(r"[※＊\*]\s*(\S+?)[\s　]+(\S+?)[\s　]+(?:\d+年)", text)
+    if m2:
+        info["メーカー"] = m2.group(1)
+        info["車種"] = m2.group(2)
+    return info
+
+
+def filter_and_format_assessment(df: "pd.DataFrame", info: dict[str, str]) -> str:
+    """vehicle infoでDataFrameを絞り込み、テキストに変換する。"""
+    if df is None or df.empty or not info:
+        return ""
+    filtered = df.copy()
+    if "メーカー" in info and "メーカー" in filtered.columns:
+        filtered = filtered[filtered["メーカー"].str.contains(info["メーカー"], na=False, case=False)]
+    if "車種" in info and "車種" in filtered.columns:
+        filtered = filtered[filtered["車種"].str.contains(info["車種"], na=False, case=False)]
+    if "年式" in info and "年式" in filtered.columns:
+        filtered = filtered[filtered["年式"].str.contains(info["年式"], na=False)]
+    if filtered.empty:
+        return ""
+    lines: list[str] = []
+    for _, row in filtered.iterrows():
+        vals = [str(v).strip() for v in row.values if str(v).strip() and str(v).strip().lower() != "nan"]
+        if vals:
+            lines.append(" | ".join(vals))
     return "\n".join(lines)
 
 
@@ -1334,7 +1380,7 @@ with tab_main:
         sections = get_prompt_sections(selected_service, rules)
         base_system_prompt = assemble_prompt(sections)
 
-        # 追加タブ（エビデンス・査定実績等）をプロンプトに付加
+        # 追加タブ（エビデンス等）をプロンプトに付加（査定実績（基本）はper-serif絞り込みのため除外）
         for _label, _tab_url in extra_tab_urls(selected_service):
             _tab_text = get_assessment_cases(_tab_url)
             if _tab_text:
@@ -1344,6 +1390,15 @@ with tab_main:
                     f"{_tab_text}\n"
                     f"</{_label}>"
                 )
+
+        # 査定実績（基本）をDataFrameとして事前ロード（per-serif絞り込み用）
+        _va_tab = SERVICES[selected_service].get("vehicle_assessment_tab")
+        _va_df = None
+        if _va_tab:
+            _va_sid = SERVICES[selected_service]["sheet_id"]
+            _va_url = f"https://docs.google.com/spreadsheets/d/{_va_sid}/export?format=csv&gid={_va_tab['gid']}"
+            _va_label = _va_tab["label"]
+            _va_df = get_assessment_df(_va_url)
 
         past_feedback = load_user_feedback(selected_service, user_email)
 
@@ -1378,6 +1433,20 @@ with tab_main:
             url_ctx = extract_url_contexts(serif, chusyaku)
             if url_ctx:
                 script_text += url_ctx
+
+            # 査定実績（基本）：注釈から車両情報を抽出して絞り込んだ事例を付加
+            if _va_df is not None:
+                _search_text = f"{serif} {chusyaku}"
+                _vinfo = extract_vehicle_info(_search_text)
+                _va_text = filter_and_format_assessment(_va_df, _vinfo)
+                if _va_text:
+                    script_text += (
+                        f"\n\n<{_va_label}>\n"
+                        f"以下は該当車種（{', '.join(f'{k}:{v}' for k, v in _vinfo.items())}）の査定実績です。\n"
+                        f"{_va_text}\n"
+                        f"</{_va_label}>"
+                    )
+
             relevant_fb = find_relevant_feedback(past_feedback, serif)
             feedback_block = build_feedback_block(relevant_fb)
             all_items.append((serif, chusyaku, feedback_block, script_text))
