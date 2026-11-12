@@ -1,6 +1,8 @@
 import concurrent.futures
 from datetime import datetime
+import os
 import re
+import uuid
 
 import anthropic
 import pandas as pd
@@ -180,10 +182,24 @@ MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
 PROMPT_VERSION = "v5"  # 上げると全ユーザーのセッションキャッシュをリセット
-INPUT_PRICE_PER_1M_USD = 2.00
-OUTPUT_PRICE_PER_1M_USD = 10.00
-CACHE_WRITE_PRICE_PER_1M_USD = 2.50   # input * 1.25
-CACHE_READ_PRICE_PER_1M_USD = 0.20    # input * 0.10
+USD_JPY = 150
+APP_VERSION = "v2.0"  # increment when logging schema changes
+
+# claude-sonnet-5 pricing (USD per 1M tokens)
+INPUT_PRICE_PER_1M_USD          = 2.00
+OUTPUT_PRICE_PER_1M_USD         = 10.00
+CACHE_WRITE_5M_PRICE_PER_1M_USD = 2.50   # ephemeral 5-minute cache write
+CACHE_WRITE_1H_PRICE_PER_1M_USD = 4.00   # ephemeral 1-hour cache write
+CACHE_READ_PRICE_PER_1M_USD     = 0.20
+
+# Keep old name as alias for dashboard display
+CACHE_WRITE_PRICE_PER_1M_USD = CACHE_WRITE_5M_PRICE_PER_1M_USD
+
+
+def _detect_env() -> str:
+    # Streamlit Cloud sets STREAMLIT_SHARING_MODE=streamlit
+    return "cloud" if os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit" else "local"
+
 
 # プロンプトのセクション順序と表示ラベル
 SECTION_ORDER = ["役割・判定様式", "審査基準", "判定補足", "判定原則", "出力仕様・最終確認"]
@@ -465,11 +481,18 @@ def extra_tab_urls(service_key: str) -> list[tuple[str, str]]:
     ]
 
 
-def calc_cost_usd(input_tokens: int, output_tokens: int, cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> float:
+def calc_cost_usd(
+    input_tokens: int,
+    output_tokens: int,
+    cache_write_5m: int = 0,
+    cache_write_1h: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
     return (
-        input_tokens * INPUT_PRICE_PER_1M_USD
-        + output_tokens * OUTPUT_PRICE_PER_1M_USD
-        + cache_write_tokens * CACHE_WRITE_PRICE_PER_1M_USD
+        input_tokens        * INPUT_PRICE_PER_1M_USD
+        + output_tokens     * OUTPUT_PRICE_PER_1M_USD
+        + cache_write_5m    * CACHE_WRITE_5M_PRICE_PER_1M_USD
+        + cache_write_1h    * CACHE_WRITE_1H_PRICE_PER_1M_USD
         + cache_read_tokens * CACHE_READ_PRICE_PER_1M_USD
     ) / 1_000_000
 
@@ -502,22 +525,46 @@ if FEEDBACK_ENABLED:
             ws.append_row(["timestamp", "user_email", "service", "serif", "chusyaku", "ai_result", "feedback"])
             return ws
 
-    _USAGE_HEADERS = ["timestamp", "user_email", "service", "row_count", "input_tokens", "output_tokens", "cost_usd",
-                      "cache_write_tokens", "cache_read_tokens"]
+    _USAGE_HEADERS = [
+        "timestamp_utc", "run_id", "user_email", "service", "row_count", "api_calls",
+        "input_tokens", "cache_write_5m", "cache_write_1h", "cache_read_tokens",
+        "total_input_tokens", "output_tokens", "cost_usd", "model", "app_version", "env",
+    ]
+
+    _CALLS_HEADERS = [
+        "timestamp_utc", "run_id", "user_email", "service", "mode", "row_index", "model",
+        "input_tokens", "cache_write_5m", "cache_write_1h", "cache_read", "output_tokens",
+        "cost_usd", "status", "error_message", "app_version", "env",
+    ]
 
     @st.cache_resource
     def _usage_log_ws():
         try:
             ws = _get_spreadsheet().worksheet("usage_log")
-            # 既存シートのヘッダーが旧形式（7列）ならキャッシュ列を追加
-            if len(ws.row_values(1)) < len(_USAGE_HEADERS):
-                if ws.col_count < len(_USAGE_HEADERS):
-                    ws.add_cols(len(_USAGE_HEADERS) - ws.col_count)
+            existing_headers = ws.row_values(1)
+            if existing_headers != _USAGE_HEADERS:
+                needed_cols = len(_USAGE_HEADERS)
+                if ws.col_count < needed_cols:
+                    ws.add_cols(needed_cols - ws.col_count)
                 ws.update(range_name="A1", values=[_USAGE_HEADERS])
             return ws
         except gspread.exceptions.WorksheetNotFound:
             ws = _get_spreadsheet().add_worksheet(title="usage_log", rows=10000, cols=len(_USAGE_HEADERS))
             ws.append_row(_USAGE_HEADERS)
+            return ws
+
+    @st.cache_resource
+    def _usage_calls_ws():
+        try:
+            ws = _get_spreadsheet().worksheet("usage_log_calls")
+            if len(ws.row_values(1)) < len(_CALLS_HEADERS):
+                if ws.col_count < len(_CALLS_HEADERS):
+                    ws.add_cols(len(_CALLS_HEADERS) - ws.col_count)
+                ws.update(range_name="A1", values=[_CALLS_HEADERS])
+            return ws
+        except gspread.exceptions.WorksheetNotFound:
+            ws = _get_spreadsheet().add_worksheet(title="usage_log_calls", rows=100000, cols=len(_CALLS_HEADERS))
+            ws.append_row(_CALLS_HEADERS)
             return ws
 
 
@@ -550,14 +597,61 @@ def save_feedback_rows(service_key: str, user_email: str, rows: list[dict]) -> i
         return 0
 
 
-def log_usage(user_email: str, service_key: str, row_count: int, input_tokens: int, output_tokens: int, cost_usd: float,
-              cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> None:
+def log_usage(
+    run_id: str,
+    user_email: str,
+    service_key: str,
+    row_count: int,
+    api_calls: int,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    cache_write_5m: int = 0,
+    cache_write_1h: int = 0,
+    cache_read_tokens: int = 0,
+    model: str = MODEL_NAME,
+) -> None:
     if not FEEDBACK_ENABLED:
         return
     try:
         ws = _usage_log_ws()
-        ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_email, service_key, row_count,
-                       input_tokens, output_tokens, round(cost_usd, 6), cache_write_tokens, cache_read_tokens])
+        total_input = input_tokens + cache_write_5m + cache_write_1h + cache_read_tokens
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([
+            ts, run_id, user_email, service_key, row_count, api_calls,
+            input_tokens, cache_write_5m, cache_write_1h, cache_read_tokens,
+            total_input, output_tokens, round(cost_usd, 6),
+            model, APP_VERSION, _detect_env(),
+        ])
+    except Exception:
+        pass
+
+
+def log_calls_batch(
+    run_id: str,
+    user_email: str,
+    service_key: str,
+    mode: str,
+    call_rows: list[dict],
+) -> None:
+    """Log a batch of per-API-call rows to usage_log_calls sheet."""
+    if not FEEDBACK_ENABLED or not call_rows:
+        return
+    try:
+        ws = _usage_calls_ws()
+        env = _detect_env()
+        rows = []
+        for r in call_rows:
+            rows.append([
+                r["timestamp_utc"], run_id, user_email, service_key, mode,
+                r["row_index"], r["model"],
+                r["input_tokens"], r["cache_write_5m"], r["cache_write_1h"],
+                r["cache_read"], r["output_tokens"],
+                round(r["cost_usd"], 6),
+                r["status"], r.get("error_message", ""),
+                APP_VERSION, env,
+            ])
+        ws.append_rows(rows, value_input_option="RAW")
     except Exception:
         pass
 
@@ -572,13 +666,25 @@ def load_usage_log() -> pd.DataFrame:
         if not records:
             return pd.DataFrame()
         df = pd.DataFrame(records)
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        for col in ["row_count", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens"]:
+        # Normalize timestamp column name (old: "timestamp", new: "timestamp_utc")
+        if "timestamp" in df.columns and "timestamp_utc" not in df.columns:
+            df = df.rename(columns={"timestamp": "timestamp_utc"})
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"])
+        # Normalize old cache_write_tokens column
+        if "cache_write_tokens" in df.columns and "cache_write_5m" not in df.columns:
+            df["cache_write_5m"] = pd.to_numeric(df["cache_write_tokens"], errors="coerce").fillna(0).astype(int)
+        for col in ["row_count", "api_calls", "input_tokens", "output_tokens",
+                    "cache_write_5m", "cache_write_1h", "cache_read_tokens", "total_input_tokens"]:
             if col not in df.columns:
                 df[col] = 0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
         if "cost_usd" in df.columns:
             df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
+        # Mark rows written by old logging logic (missing new columns)
+        if "total_input_tokens" in df.columns:
+            df["is_legacy"] = df["total_input_tokens"] == 0
+        else:
+            df["is_legacy"] = True
         return df
     except Exception:
         return pd.DataFrame()
@@ -877,7 +983,8 @@ def check_script(
     script_text: str,
     feedback_text: str = "",
     use_cache: bool = True,
-) -> tuple[str, int, int, int, int]:
+) -> tuple[str, int, int, int, int, int, str]:
+    """Returns (text, input_tokens, output_tokens, cache_write_5m, cache_write_1h, cache_read, model_name)"""
     # 全セリフ共通の固定部分（役割・審査基準・参照データ等）だけをキャッシュ対象にする。
     # セリフごとに変わるフィードバック事例はキャッシュの後ろに別ブロックで置く。
     system: list[dict] = [{"type": "text", "text": base_prompt}]
@@ -903,9 +1010,18 @@ def check_script(
     usage = getattr(message, "usage", None)
     in_tok = usage.input_tokens if usage else 0
     out_tok = usage.output_tokens if usage else 0
-    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    # Distinguish 5-minute vs 1-hour ephemeral cache writes
+    cache_creation = getattr(usage, "cache_creation", None)
+    if cache_creation is not None:
+        cw_5m = getattr(cache_creation, "ephemeral_5m_input_tokens", 0) or 0
+        cw_1h = getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+    else:
+        # Fallback: older API returns flat cache_creation_input_tokens (treat as 5m)
+        cw_5m = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cw_1h = 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    return text, in_tok, out_tok, cache_write, cache_read
+    actual_model = getattr(message, "model", MODEL_NAME)
+    return text, in_tok, out_tok, cw_5m, cw_1h, cache_read, actual_model
 
 
 def is_ok(result: str) -> bool:
@@ -950,7 +1066,7 @@ def show_admin_dashboard() -> None:
             st.rerun()
     with col_note:
         st.markdown(
-            f"<span style='color:#94A3B8;font-size:0.8rem;'>コスト計算基準：{MODEL_NAME} / 入力 ${INPUT_PRICE_PER_1M_USD}/1M・出力 ${OUTPUT_PRICE_PER_1M_USD}/1M・キャッシュ書込 ${CACHE_WRITE_PRICE_PER_1M_USD}/1M・読込 ${CACHE_READ_PRICE_PER_1M_USD}/1M</span>",
+            f"<span style='color:#94A3B8;font-size:0.8rem;'>コスト計算基準：{MODEL_NAME} / 入力 ${INPUT_PRICE_PER_1M_USD}/1M・出力 ${OUTPUT_PRICE_PER_1M_USD}/1M・キャッシュ書込5分 ${CACHE_WRITE_5M_PRICE_PER_1M_USD}/1M・1時間 ${CACHE_WRITE_1H_PRICE_PER_1M_USD}/1M・読込 ${CACHE_READ_PRICE_PER_1M_USD}/1M</span>",
             unsafe_allow_html=True,
         )
 
@@ -959,45 +1075,64 @@ def show_admin_dashboard() -> None:
         st.info("まだ利用ログがありません。")
         return
 
-    min_dt = df["timestamp"].min().date()
-    max_dt = df["timestamp"].max().date()
+    min_dt = df["timestamp_utc"].min().date()
+    max_dt = df["timestamp_utc"].max().date()
     col_from, col_to, _ = st.columns([1, 1, 3])
     with col_from:
         date_from = st.date_input("開始日", value=min_dt, min_value=min_dt, max_value=max_dt)
     with col_to:
         date_to = st.date_input("終了日", value=max_dt, min_value=min_dt, max_value=max_dt)
-    df = df[(df["timestamp"].dt.date >= date_from) & (df["timestamp"].dt.date <= date_to)]
+    df = df[(df["timestamp_utc"].dt.date >= date_from) & (df["timestamp_utc"].dt.date <= date_to)]
 
     if df.empty:
         st.warning("選択期間にデータがありません。")
         return
 
+    # Legacy data warning
+    if df.get("is_legacy", pd.Series([False])).any():
+        st.warning("⚠️ 選択期間には旧ロジック（キャッシュトークン未計上）のデータが含まれています。コスト合計は実際より低く表示される場合があります。")
+
     total_users = df["user_email"].nunique()
     total_audits = len(df)
     total_rows = int(df["row_count"].sum())
     total_cost_usd = df["cost_usd"].sum()
-    avg_cost_jpy = (total_cost_usd / total_audits * 150) if total_audits > 0 else 0
+    avg_cost_jpy = (total_cost_usd / total_audits * USD_JPY) if total_audits > 0 else 0
+
+    total_input = int(df["input_tokens"].sum())
+    total_cw5 = int(df["cache_write_5m"].sum())
+    total_cw1 = int(df["cache_write_1h"].sum())
+    total_cr = int(df["cache_read_tokens"].sum())
+    total_out = int(df["output_tokens"].sum())
+    total_total_input = total_input + total_cw5 + total_cw1 + total_cr
+    cache_read_rate = (total_cr / total_total_input * 100) if total_total_input > 0 else 0
 
     st.markdown(f"""
     <div class="kpi-row">
       <div class="kpi-card total"><div class="kpi-label">利用ユーザー数</div><div class="kpi-value">{total_users}</div><div class="kpi-sub">名</div></div>
       <div class="kpi-card ok"><div class="kpi-label">審査実行回数</div><div class="kpi-value">{total_audits}</div><div class="kpi-sub">回</div></div>
       <div class="kpi-card ng"><div class="kpi-label">セリフ審査総数</div><div class="kpi-value">{total_rows:,}</div><div class="kpi-sub">件</div></div>
-      <div class="kpi-card purple"><div class="kpi-label">推定コスト合計</div><div class="kpi-value">${total_cost_usd:.2f}</div><div class="kpi-sub">USD（¥{total_cost_usd*150:.0f}相当）</div></div>
+      <div class="kpi-card purple"><div class="kpi-label">コスト合計</div><div class="kpi-value">${total_cost_usd:.2f}</div><div class="kpi-sub">USD（¥{total_cost_usd*USD_JPY:.0f}相当）</div></div>
       <div class="kpi-card total"><div class="kpi-label">1回あたり平均コスト</div><div class="kpi-value">¥{avg_cost_jpy:.1f}</div><div class="kpi-sub">({total_cost_usd/total_audits*100:.2f}¢ USD)</div></div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi-card total"><div class="kpi-label">入力合計（キャッシュ込み）</div><div class="kpi-value">{total_total_input:,}</div><div class="kpi-sub">tokens</div></div>
+      <div class="kpi-card ok"><div class="kpi-label">うちキャッシュ読み取り</div><div class="kpi-value">{total_cr:,}</div><div class="kpi-sub">tokens（読取率 {cache_read_rate:.1f}%）</div></div>
+      <div class="kpi-card ng"><div class="kpi-label">うちキャッシュ書き込み</div><div class="kpi-value">{total_cw5+total_cw1:,}</div><div class="kpi-sub">tokens（5分: {total_cw5:,} / 1時間: {total_cw1:,}）</div></div>
+      <div class="kpi-card purple"><div class="kpi-label">出力トークン合計</div><div class="kpi-value">{total_out:,}</div><div class="kpi-sub">tokens</div></div>
     </div>
     """, unsafe_allow_html=True)
 
     # ── 日別消費量 ────────────────────────────────────────────────────────────
-    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>📅 日別消費量</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>📅 日別消費量（UTC基準）</h2>", unsafe_allow_html=True)
     daily = (
-        df.assign(日付=df["timestamp"].dt.date)
+        df.assign(日付=df["timestamp_utc"].dt.date)
         .groupby("日付")
         .agg(
             審査回数=("row_count", "count"),
             セリフ数=("row_count", "sum"),
             入力Token=("input_tokens", "sum"),
-            キャッシュ書込Token=("cache_write_tokens", "sum"),
+            キャッシュ書込5m=("cache_write_5m", "sum"),
+            キャッシュ書込1h=("cache_write_1h", "sum"),
             キャッシュ読込Token=("cache_read_tokens", "sum"),
             出力Token=("output_tokens", "sum"),
             コスト_USD=("cost_usd", "sum"),
@@ -1005,7 +1140,9 @@ def show_admin_dashboard() -> None:
         .reset_index()
         .sort_values("日付")
     )
-    daily["コスト_円"] = (daily["コスト_USD"] * 150).round(0).astype(int)
+    daily["入力合計Token"] = daily["入力Token"] + daily["キャッシュ書込5m"] + daily["キャッシュ書込1h"] + daily["キャッシュ読込Token"]
+    daily["コスト_円"] = (daily["コスト_USD"] * USD_JPY).round(0).astype(int)
+    daily["読取率%"] = (daily["キャッシュ読込Token"] / daily["入力合計Token"].replace(0, 1) * 100).round(1)
     daily["日付"] = daily["日付"].astype(str)
 
     chart_col, _ = st.columns([3, 1])
@@ -1017,7 +1154,8 @@ def show_admin_dashboard() -> None:
         )
 
     display_daily = daily.rename(columns={"コスト_USD": "コスト(USD)", "コスト_円": "コスト(円)"})[
-        ["日付", "審査回数", "セリフ数", "入力Token", "キャッシュ書込Token", "キャッシュ読込Token", "出力Token", "コスト(USD)", "コスト(円)"]
+        ["日付", "審査回数", "セリフ数", "入力Token", "キャッシュ書込5m", "キャッシュ書込1h",
+         "キャッシュ読込Token", "入力合計Token", "出力Token", "読取率%", "コスト(USD)", "コスト(円)"]
     ].copy()
     display_daily["コスト(USD)"] = display_daily["コスト(USD)"].round(4)
     st.dataframe(display_daily, use_container_width=True, hide_index=True)
@@ -1025,9 +1163,15 @@ def show_admin_dashboard() -> None:
     st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>👤 ユーザー別利用状況</h2>", unsafe_allow_html=True)
     user_summary = (
         df.groupby("user_email")
-        .agg(審査回数=("row_count", "count"), セリフ審査数=("row_count", "sum"),
-             入力Token合計=("input_tokens", "sum"), 出力Token合計=("output_tokens", "sum"),
-             推定コスト_USD=("cost_usd", "sum"), 最終利用日時=("timestamp", "max"))
+        .agg(
+            審査回数=("row_count", "count"),
+            セリフ審査数=("row_count", "sum"),
+            入力Token合計=("input_tokens", "sum"),
+            キャッシュ読込Token=("cache_read_tokens", "sum"),
+            出力Token合計=("output_tokens", "sum"),
+            推定コスト_USD=("cost_usd", "sum"),
+            最終利用日時=("timestamp_utc", "max"),
+        )
         .reset_index().rename(columns={"user_email": "メールアドレス"})
         .sort_values("審査回数", ascending=False)
     )
@@ -1036,13 +1180,14 @@ def show_admin_dashboard() -> None:
     st.dataframe(user_summary, use_container_width=True, hide_index=True)
 
     st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>🕐 直近の利用履歴</h2>", unsafe_allow_html=True)
-    recent = df.sort_values("timestamp", ascending=False).head(100).copy()
-    recent["日時"] = recent["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
-    recent = recent.rename(columns={"user_email": "メール", "service": "サービス", "row_count": "セリフ数",
-                                    "input_tokens": "入力Token", "output_tokens": "出力Token", "cost_usd": "コスト(USD)"})[
-        ["日時", "メール", "サービス", "セリフ数", "入力Token", "出力Token", "コスト(USD)"]
-    ]
-    st.dataframe(recent, use_container_width=True, hide_index=True)
+    recent = df.sort_values("timestamp_utc", ascending=False).head(100).copy()
+    recent["日時(UTC)"] = recent["timestamp_utc"].dt.strftime("%Y-%m-%d %H:%M")
+    recent = recent.rename(columns={
+        "user_email": "メール", "service": "サービス", "row_count": "セリフ数",
+        "input_tokens": "入力Token", "cache_read_tokens": "キャッシュ読込", "output_tokens": "出力Token", "cost_usd": "コスト(USD)"
+    })
+    display_cols = ["日時(UTC)", "メール", "サービス", "セリフ数", "入力Token", "キャッシュ読込", "出力Token", "コスト(USD)"]
+    st.dataframe(recent[[c for c in display_cols if c in recent.columns]], use_container_width=True, hide_index=True)
 
 
 # ─── プロンプト管理タブ（管理者のみ） ────────────────────────────────────────
@@ -1407,8 +1552,10 @@ with tab_main:
         result_list: list[str] = []
         total_input_tokens: int = 0
         total_output_tokens: int = 0
-        total_cache_write_tokens: int = 0
+        total_cache_write_5m: int = 0
+        total_cache_write_1h: int = 0
         total_cache_read_tokens: int = 0
+        last_model: str = MODEL_NAME
 
         # 全セリフの入力を事前準備（メインスレッドで実行）
         all_serifs = [str(r["セリフ"]).strip() for _, r in valid_df.iterrows()]
@@ -1449,45 +1596,82 @@ with tab_main:
 
             relevant_fb = find_relevant_feedback(past_feedback, serif)
             feedback_block = build_feedback_block(relevant_fb)
-            all_items.append((serif, chusyaku, feedback_block, script_text))
+            all_items.append((i, serif, chusyaku, feedback_block, script_text))
+
+        run_id = str(uuid.uuid4())
 
         def _call_api(args: tuple) -> tuple:
-            _serif, _chusyaku, _fb_block, _text = args
+            _idx, _serif, _chusyaku, _fb_block, _text = args
+            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             try:
-                _result, _in, _out, _cw, _cr = check_script(client, base_system_prompt, _text, feedback_text=_fb_block)
+                _result, _in, _out, _cw5, _cw1, _cr, _model = check_script(
+                    client, base_system_prompt, _text, feedback_text=_fb_block
+                )
+                _cost = calc_cost_usd(_in, _out, _cw5, _cw1, _cr)
+                _call_row = {
+                    "timestamp_utc": ts, "row_index": _idx, "model": _model,
+                    "input_tokens": _in, "cache_write_5m": _cw5, "cache_write_1h": _cw1,
+                    "cache_read": _cr, "output_tokens": _out,
+                    "cost_usd": _cost, "status": "ok", "error_message": "",
+                }
             except Exception as e:
-                _result, _in, _out, _cw, _cr = f"[APIエラー: {e}]", 0, 0, 0, 0
-            return _serif, _chusyaku, _result, _in, _out, _cw, _cr
+                _result = f"[APIエラー: {e}]"
+                _in, _out, _cw5, _cw1, _cr, _model = 0, 0, 0, 0, 0, MODEL_NAME
+                _cost = 0.0
+                _call_row = {
+                    "timestamp_utc": ts, "row_index": _idx, "model": _model,
+                    "input_tokens": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+                    "cache_read": 0, "output_tokens": 0,
+                    "cost_usd": 0.0, "status": "error", "error_message": str(e),
+                }
+            return _serif, _chusyaku, _result, _in, _out, _cw5, _cw1, _cr, _model, _call_row
 
         progress_bar = st.progress(0, text=f"処理中... 0/{total}件")
         ordered: list[tuple | None] = [None] * total
+        pending_call_rows: list[dict] = []
+        BATCH_SIZE = 5  # flush call logs every N completions
 
         with st.spinner("AIがチェック中です..."):
             # 1件目を先に処理してキャッシュを作成（並列で同時に送ると全件がキャッシュ書き込みになるため）
             ordered[0] = _call_api(all_items[0])
             completed = 1
+            pending_call_rows.append(ordered[0][-1])  # type: ignore[index]
             progress_bar.progress(completed / total, text=f"処理中... {completed}/{total}件")
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 future_map = {executor.submit(_call_api, item): i for i, item in enumerate(all_items) if i > 0}
                 for future in concurrent.futures.as_completed(future_map):
-                    ordered[future_map[future]] = future.result()
+                    result_tuple = future.result()
+                    ordered[future_map[future]] = result_tuple
+                    pending_call_rows.append(result_tuple[-1])
                     completed += 1
                     progress_bar.progress(completed / total, text=f"処理中... {completed}/{total}件")
+                    # Flush call logs in batches to avoid losing data on interruption
+                    if len(pending_call_rows) >= BATCH_SIZE:
+                        log_calls_batch(run_id, user_email, selected_service, "台本", pending_call_rows)
+                        pending_call_rows.clear()
 
-        for serif, chusyaku, result, in_tok, out_tok, cw_tok, cr_tok in ordered:  # type: ignore[misc]
+        # Flush remaining call rows
+        if pending_call_rows:
+            log_calls_batch(run_id, user_email, selected_service, "台本", pending_call_rows)
+            pending_call_rows.clear()
+
+        for serif, chusyaku, result, in_tok, out_tok, cw5_tok, cw1_tok, cr_tok, model_name, _call_row in ordered:  # type: ignore[misc]
             serif_list.append(serif)
             chusyaku_list.append(chusyaku)
             result_list.append(result)
             total_input_tokens += in_tok
             total_output_tokens += out_tok
-            total_cache_write_tokens += cw_tok
+            total_cache_write_5m += cw5_tok
+            total_cache_write_1h += cw1_tok
             total_cache_read_tokens += cr_tok
+            last_model = model_name
 
         progress_bar.progress(1.0, text="✅ 完了!")
 
-        cost_usd = calc_cost_usd(total_input_tokens, total_output_tokens, total_cache_write_tokens, total_cache_read_tokens)
-        log_usage(user_email, selected_service, total, total_input_tokens, total_output_tokens, cost_usd,
-                  total_cache_write_tokens, total_cache_read_tokens)
+        cost_usd = calc_cost_usd(total_input_tokens, total_output_tokens, total_cache_write_5m, total_cache_write_1h, total_cache_read_tokens)
+        log_usage(run_id, user_email, selected_service, total, total,
+                  total_input_tokens, total_output_tokens, cost_usd,
+                  total_cache_write_5m, total_cache_write_1h, total_cache_read_tokens, last_model)
 
         st.session_state.audit_results = {
             "service": selected_service,
@@ -1730,11 +1914,21 @@ with tab_article:
             with st.spinner("AIがチェック中です..."):
                 try:
                     # 記事チェックは1回きりの呼び出しで再利用されないため、キャッシュ（25%割増の書き込み）を使わない
-                    _art_result, _art_in, _art_out, _art_cw, _art_cr = check_script(
+                    _art_run_id = str(uuid.uuid4())
+                    _art_result, _art_in, _art_out, _art_cw5, _art_cw1, _art_cr, _art_model = check_script(
                         _art_client, _art_system, _art_text, use_cache=False
                     )
-                    _art_cost = calc_cost_usd(_art_in, _art_out, _art_cw, _art_cr)
-                    log_usage(user_email, f"{_art_service}（記事）", 1, _art_in, _art_out, _art_cost, _art_cw, _art_cr)
+                    _art_cost = calc_cost_usd(_art_in, _art_out, _art_cw5, _art_cw1, _art_cr)
+                    _art_call_row = {
+                        "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        "row_index": 0, "model": _art_model,
+                        "input_tokens": _art_in, "cache_write_5m": _art_cw5, "cache_write_1h": _art_cw1,
+                        "cache_read": _art_cr, "output_tokens": _art_out,
+                        "cost_usd": _art_cost, "status": "ok", "error_message": "",
+                    }
+                    log_calls_batch(_art_run_id, user_email, f"{_art_service}（記事）", "記事", [_art_call_row])
+                    log_usage(_art_run_id, user_email, f"{_art_service}（記事）", 1, 1,
+                              _art_in, _art_out, _art_cost, _art_cw5, _art_cw1, _art_cr, _art_model)
                     st.session_state["article_result"] = _art_result
                 except Exception as _art_e:
                     st.error(f"APIエラー: {_art_e}")
