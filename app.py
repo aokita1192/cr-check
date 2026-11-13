@@ -944,12 +944,18 @@ def fetch_article_text_long(url: str) -> str:
         return ""
 
 
+_SKIP_URL_PATTERNS = ("drive.google.com", "docs.google.com/drive", "drivesdk")
+
+
 def extract_url_contexts(serif: str, annotation: str = "") -> str:
-    """セリフ・注釈中のURLを検出し、参照コンテンツを付記テキストで返す。"""
+    """セリフ・注釈中のURLを検出し、参照コンテンツを付記テキストで返す。
+    Google Drive等テキスト取得できないURLはスキップする。
+    """
     combined = serif + " " + annotation
     seen: dict[str, None] = {}
     for u in _URL_PATTERN.findall(combined):
-        seen[u] = None  # 重複排除・順序保持
+        if not any(pat in u for pat in _SKIP_URL_PATTERNS):
+            seen[u] = None
     urls = list(seen.keys())
     if not urls:
         return ""
@@ -1612,7 +1618,7 @@ with tab_main:
         total_cache_read_tokens: int = 0
         last_model: str = MODEL_NAME
 
-        # 全セリフの入力を事前準備（メインスレッドで実行）
+        # 全セリフの入力を事前準備（URL取得・査定実績絞り込みは_call_api内で並列実行）
         all_serifs = [str(r["セリフ"]).strip() for _, r in valid_df.iterrows()]
         all_items: list[tuple] = []
         for i, (_, row) in enumerate(valid_df.iterrows()):
@@ -1627,37 +1633,35 @@ with tab_main:
             ctx_parts.append(f"【審査対象のセリフ】\n{serif}")
             if i < len(all_serifs) - 1:
                 ctx_parts.append(f"【次のセリフ（文脈参照のみ・審査対象外）】\n{all_serifs[i+1]}")
-            script_text = "\n\n".join(ctx_parts)
+            base_text = "\n\n".join(ctx_parts)
             if chusyaku:
-                script_text += f"\n\n【注釈】\n{chusyaku}"
+                base_text += f"\n\n【注釈】\n{chusyaku}"
 
-            # セリフ・注釈中のURLを検出して参照コンテンツを付加
-            url_ctx = extract_url_contexts(serif, chusyaku)
+            relevant_fb = find_relevant_feedback(past_feedback, serif)
+            feedback_block = build_feedback_block(relevant_fb)
+            all_items.append((i, serif, chusyaku, feedback_block, base_text))
+
+        run_id = str(uuid.uuid4())
+
+        def _call_api(args: tuple) -> tuple:
+            _idx, _serif, _chusyaku, _fb_block, _base_text = args
+            # URL取得と査定実績絞り込みを並列ワーカー内で実行
+            _text = _base_text
+            url_ctx = extract_url_contexts(_serif, _chusyaku)
             if url_ctx:
-                script_text += url_ctx
-
-            # 査定実績（基本）：注釈から車両情報を抽出して絞り込んだ事例を付加
-            _serif_assessment_records: list[dict[str, str]] = []
+                _text += url_ctx
+            _arecs: list[dict[str, str]] = []
             if _va_df is not None:
-                _search_text = f"{serif} {chusyaku}"
+                _search_text = f"{_serif} {_chusyaku}"
                 _vinfo = extract_vehicle_info(_search_text)
-                _va_text, _serif_assessment_records = filter_and_format_assessment(_va_df, _vinfo)
+                _va_text, _arecs = filter_and_format_assessment(_va_df, _vinfo)
                 if _va_text:
-                    script_text += (
+                    _text += (
                         f"\n\n<{_va_label}>\n"
                         f"以下は該当車種（{', '.join(f'{k}:{v}' for k, v in _vinfo.items())}）の査定実績です。\n"
                         f"{_va_text}\n"
                         f"</{_va_label}>"
                     )
-
-            relevant_fb = find_relevant_feedback(past_feedback, serif)
-            feedback_block = build_feedback_block(relevant_fb)
-            all_items.append((i, serif, chusyaku, feedback_block, script_text, _serif_assessment_records))
-
-        run_id = str(uuid.uuid4())
-
-        def _call_api(args: tuple) -> tuple:
-            _idx, _serif, _chusyaku, _fb_block, _text, _assessment_nums = args
             ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             try:
                 _result, _in, _out, _cw5, _cw1, _cr, _model = check_script(
@@ -1680,7 +1684,7 @@ with tab_main:
                     "cache_read": 0, "output_tokens": 0,
                     "cost_usd": 0.0, "status": "error", "error_message": str(e),
                 }
-            return _serif, _chusyaku, _result, _in, _out, _cw5, _cw1, _cr, _model, _call_row, _assessment_nums
+            return _serif, _chusyaku, _result, _in, _out, _cw5, _cw1, _cr, _model, _call_row, _arecs
 
         progress_bar = st.progress(0, text=f"処理中... 0/{total}件")
         ordered = [None] * total
