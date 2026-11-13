@@ -809,13 +809,28 @@ def get_assessment_cases(csv_url: str) -> str:
 
 @st.cache_data(ttl=3600)
 def get_assessment_df(csv_url: str) -> "pd.DataFrame | None":
-    """査定実績（基本）CSVをDataFrameとして返す（車両絞り込み用）。"""
+    """査定実績（基本）CSVをDataFrameとして返す（車両絞り込み用）。
+    シートの先頭に説明ブロックがあるため、「ボディタイプ」列を含む行をヘッダーとして自動検出する。
+    skiprows は複数行セルと相性が悪いため、raw df をそのまま加工する。
+    """
     try:
-        df = pd.read_csv(csv_url, dtype=str)
-        return df.dropna(how="all").fillna("")
+        df_raw = pd.read_csv(csv_url, header=None, dtype=str)
     except Exception as e:
         st.warning(f"⚠️ 査定実績の取得に失敗しました（{e}）。")
         return None
+    # ヘッダー行を検索（データ列にのみ存在する「ボディタイプ」で識別）
+    header_row = None
+    for i, row in df_raw.iterrows():
+        if row.astype(str).str.contains("ボディタイプ", regex=False).any():
+            header_row = i
+            break
+    if header_row is None:
+        return None
+    # ヘッダー行を列名として設定し、それ以降の行をデータとして使用
+    col_names = [str(v).replace("\n", "").strip() for v in df_raw.iloc[header_row]]
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = col_names
+    return df.dropna(how="all").fillna("")
 
 
 def extract_vehicle_info(text: str) -> dict[str, str]:
