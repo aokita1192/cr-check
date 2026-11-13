@@ -731,10 +731,18 @@ def get_regulations(csv_url: str) -> str:
         st.warning(f"⚠️ スプレッドシートの取得に失敗しました（{e}）。")
         return ""
 
+    # ヘッダー行を検索（新形式: "ルール（判定基準）"、旧形式: "チェックポイント詳細"）
+    DETAIL_COL_CANDIDATES = ["ルール（判定基準）", "チェックポイント詳細"]
     header_row = None
+    detected_detail_col = None
     for i, row in df_raw.iterrows():
-        if row.astype(str).str.contains("チェックポイント詳細").any():
-            header_row = i
+        row_str = row.astype(str)
+        for candidate in DETAIL_COL_CANDIDATES:
+            if row_str.str.contains(candidate, regex=False).any():
+                header_row = i
+                detected_detail_col = candidate
+                break
+        if header_row is not None:
             break
 
     if header_row is None:
@@ -744,19 +752,29 @@ def get_regulations(csv_url: str) -> str:
     df = pd.read_csv(csv_url, skiprows=header_row, header=0, dtype=str)
     df.columns = df.columns.str.strip()
 
-    cols = ["カテゴリ", "チェック項目", "No", "チェックポイント詳細", "OK例", "NG例", "補足事項"]
-    available = [c for c in cols if c in df.columns]
-    df = df[available].dropna(subset=["チェックポイント詳細"])
+    # 新旧両形式の列名に対応
+    col_map = {
+        "detail": detected_detail_col,
+        "category": next((c for c in ["分類", "カテゴリ"] if c in df.columns), None),
+        "item": next((c for c in ["項目", "チェック項目"] if c in df.columns), None),
+        "note": next((c for c in ["注釈（コピペして使用）", "補足事項", "法的リスク"] if c in df.columns), None),
+    }
+    detail_col = col_map["detail"]
+    if not detail_col or detail_col not in df.columns:
+        st.warning("⚠️ スプレッドシートの形式が想定と異なります。")
+        return ""
+
+    df = df.dropna(subset=[detail_col])
 
     lines: list[str] = []
     for _, row in df.iterrows():
         no = str(row.get("No", "")).strip()
-        category = str(row.get("カテゴリ", "")).strip()
-        item = str(row.get("チェック項目", "")).strip()
-        detail = str(row.get("チェックポイント詳細", "")).strip()
+        category = str(row.get(col_map["category"], "")).strip() if col_map["category"] else ""
+        item = str(row.get(col_map["item"], "")).strip() if col_map["item"] else ""
+        detail = str(row.get(detail_col, "")).strip()
         ok_ex = str(row.get("OK例", "")).strip()
         ng_ex = str(row.get("NG例", "")).strip()
-        note = str(row.get("補足事項", "")).strip()
+        note = str(row.get(col_map["note"], "")).strip() if col_map["note"] else ""
 
         block = f"【No.{no}】{category}／{item}\nチェックポイント：{detail}\n"
         if ok_ex and ok_ex != "nan":
@@ -815,10 +833,27 @@ def extract_vehicle_info(text: str) -> dict[str, str]:
     return info
 
 
-def filter_and_format_assessment(df: "pd.DataFrame", info: dict[str, str]) -> str:
-    """vehicle infoでDataFrameを絞り込み、テキストに変換する。"""
+_ASSESSMENT_NUMBER_COL = "査定実績ナンバー"
+_ASSESSMENT_ANNOTATION_COL = "注釈"
+# プロンプトに含める列（URL・フラグ・画像格納先などは除外）
+_ASSESSMENT_PROMPT_COLS = ["メーカー", "車種", "グレード", "年式", "走行距離", "売却価格", "下取り額", "下取り額との差額", "査定日", "ボディタイプ"]
+
+
+def _first_line(text: str) -> str:
+    """改行・\nで区切られた最初の非空行を返す。"""
+    for line in text.replace("\\n", "\n").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return text.strip()
+
+
+def filter_and_format_assessment(df: "pd.DataFrame", info: dict[str, str]) -> tuple[str, list[dict[str, str]]]:
+    """vehicle infoでDataFrameを絞り込み、(プロンプト用テキスト, 実績レコードリスト)を返す。
+    実績レコードは {"number": "A-100", "detail": "※トヨタ アクア 2014年式 ..."} の形式。
+    """
     if df is None or df.empty or not info:
-        return ""
+        return "", []
     filtered = df.copy()
     if "メーカー" in info and "メーカー" in filtered.columns:
         filtered = filtered[filtered["メーカー"].str.contains(info["メーカー"], na=False, case=False)]
@@ -827,13 +862,32 @@ def filter_and_format_assessment(df: "pd.DataFrame", info: dict[str, str]) -> st
     if "年式" in info and "年式" in filtered.columns:
         filtered = filtered[filtered["年式"].str.contains(info["年式"], na=False)]
     if filtered.empty:
-        return ""
+        return "", []
+    has_num_col = _ASSESSMENT_NUMBER_COL in filtered.columns
+    has_ann_col = _ASSESSMENT_ANNOTATION_COL in filtered.columns
+    records: list[dict[str, str]] = []
     lines: list[str] = []
     for _, row in filtered.iterrows():
-        vals = [str(v).strip() for v in row.values if str(v).strip() and str(v).strip().lower() != "nan"]
-        if vals:
-            lines.append(" | ".join(vals))
-    return "\n".join(lines)
+        num = str(row[_ASSESSMENT_NUMBER_COL]).strip() if has_num_col else ""
+        if num.lower() == "nan":
+            num = ""
+        # 表示用 detail: 注釈列の1行目（例: ※BMW 1シリーズ 2021年式 走行120000km 査定月:2026年4月）
+        if has_ann_col:
+            ann_raw = str(row[_ASSESSMENT_ANNOTATION_COL]).strip()
+            detail = _first_line(ann_raw) if ann_raw and ann_raw.lower() != "nan" else ""
+        else:
+            detail = ""
+        # プロンプト用テキスト: 限定列のみ結合（URL等を除外）
+        prompt_vals = [num] if num else []
+        for col in _ASSESSMENT_PROMPT_COLS:
+            if col in row.index:
+                v = str(row[col]).strip()
+                if v and v.lower() != "nan":
+                    prompt_vals.append(f"{col}:{v}")
+        if prompt_vals:
+            lines.append(" | ".join(prompt_vals))
+            records.append({"number": num, "detail": detail})
+    return "\n".join(lines), records
 
 
 # ─── URL参照コンテンツ取得 ───────────────────────────────────────────────────
@@ -1550,6 +1604,7 @@ with tab_main:
         serif_list: list[str] = []
         chusyaku_list: list[str] = []
         result_list: list[str] = []
+        assessment_records_list: list[list[dict[str, str]]] = []
         total_input_tokens: int = 0
         total_output_tokens: int = 0
         total_cache_write_5m: int = 0
@@ -1582,10 +1637,11 @@ with tab_main:
                 script_text += url_ctx
 
             # 査定実績（基本）：注釈から車両情報を抽出して絞り込んだ事例を付加
+            _serif_assessment_records: list[dict[str, str]] = []
             if _va_df is not None:
                 _search_text = f"{serif} {chusyaku}"
                 _vinfo = extract_vehicle_info(_search_text)
-                _va_text = filter_and_format_assessment(_va_df, _vinfo)
+                _va_text, _serif_assessment_records = filter_and_format_assessment(_va_df, _vinfo)
                 if _va_text:
                     script_text += (
                         f"\n\n<{_va_label}>\n"
@@ -1596,12 +1652,12 @@ with tab_main:
 
             relevant_fb = find_relevant_feedback(past_feedback, serif)
             feedback_block = build_feedback_block(relevant_fb)
-            all_items.append((i, serif, chusyaku, feedback_block, script_text))
+            all_items.append((i, serif, chusyaku, feedback_block, script_text, _serif_assessment_records))
 
         run_id = str(uuid.uuid4())
 
         def _call_api(args: tuple) -> tuple:
-            _idx, _serif, _chusyaku, _fb_block, _text = args
+            _idx, _serif, _chusyaku, _fb_block, _text, _assessment_nums = args
             ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             try:
                 _result, _in, _out, _cw5, _cw1, _cr, _model = check_script(
@@ -1624,10 +1680,10 @@ with tab_main:
                     "cache_read": 0, "output_tokens": 0,
                     "cost_usd": 0.0, "status": "error", "error_message": str(e),
                 }
-            return _serif, _chusyaku, _result, _in, _out, _cw5, _cw1, _cr, _model, _call_row
+            return _serif, _chusyaku, _result, _in, _out, _cw5, _cw1, _cr, _model, _call_row, _assessment_nums
 
         progress_bar = st.progress(0, text=f"処理中... 0/{total}件")
-        ordered: list[tuple | None] = [None] * total
+        ordered = [None] * total
         pending_call_rows: list[dict] = []
         BATCH_SIZE = 5  # flush call logs every N completions
 
@@ -1655,10 +1711,11 @@ with tab_main:
             log_calls_batch(run_id, user_email, selected_service, "台本", pending_call_rows)
             pending_call_rows.clear()
 
-        for serif, chusyaku, result, in_tok, out_tok, cw5_tok, cw1_tok, cr_tok, model_name, _call_row in ordered:  # type: ignore[misc]
+        for serif, chusyaku, result, in_tok, out_tok, cw5_tok, cw1_tok, cr_tok, model_name, _call_row, _arecs in ordered:  # type: ignore[misc]
             serif_list.append(serif)
             chusyaku_list.append(chusyaku)
             result_list.append(result)
+            assessment_records_list.append(_arecs)
             total_input_tokens += in_tok
             total_output_tokens += out_tok
             total_cache_write_5m += cw5_tok
@@ -1678,6 +1735,7 @@ with tab_main:
             "serif_list": serif_list,
             "chusyaku_list": chusyaku_list,
             "result_list": result_list,
+            "assessment_records_list": assessment_records_list,
         }
 
     # ─── 審査結果表示 ─────────────────────────────────────────────────────────
@@ -1689,6 +1747,7 @@ with tab_main:
         serif_list: list[str] = results["serif_list"]
         chusyaku_list: list[str] = results["chusyaku_list"]
         result_list: list[str] = results["result_list"]
+        assessment_records_list: list[list[dict[str, str]]] = results.get("assessment_records_list", [[] for _ in serif_list])
         total: int = len(serif_list)
 
         ok_count = sum(1 for r in result_list if is_ok(r))
@@ -1704,20 +1763,36 @@ with tab_main:
         """, unsafe_allow_html=True)
 
         st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
+        _has_assessment = any(recs for recs in assessment_records_list)
+
+        def _assessment_cell(recs: list[dict[str, str]]) -> str:
+            if not recs:
+                return "<td class='cell cell-assessment'></td>"
+            cards = ""
+            for rec in recs:
+                num = rec.get("number", "")
+                detail = rec.get("detail", "")
+                num_html = f"<div class='anum'>{_esc(num)}</div>" if num else ""
+                detail_html = f"<div class='adetail'>{_esc(detail)}</div>" if detail else ""
+                cards += f"<div class='acard'>{num_html}{detail_html}</div>"
+            return f"<td class='cell cell-assessment'>{cards}</td>"
+
         rows_html = "".join(
             f"<tr>"
             f"<td class='cell cell-status'><span class='badge {'badge-ok' if is_ok(r) else 'badge-ng'}'>{'OK' if is_ok(r) else '要修正'}</span></td>"
             f"<td class='cell cell-serif'>{_esc(s)}</td>"
             f"<td class='cell cell-note'>{_esc(c)}</td>"
-            f"<td class='cell cell-result'>"
+            + (_assessment_cell(arecs) if _has_assessment else "")
+            + f"<td class='cell cell-result'>"
             + (
                 f"<button class='copy-btn' data-t=\"{_esc_attr(r)}\">📋</button>{_esc(r)}"
                 if not is_ok(r) else ""
             )
             + f"</td></tr>"
-            for s, c, r in zip(serif_list, chusyaku_list, result_list)
+            for s, c, r, arecs in zip(serif_list, chusyaku_list, result_list, assessment_records_list)
         )
         est_height = max(300, len(result_list) * 130 + 80)
+        _assessment_th = "<th>査定実績</th>" if _has_assessment else ""
         components.html(
             f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -1730,18 +1805,23 @@ tr:last-child{{border-bottom:none;}}
 tr:hover{{background:#FAFBFF;}}
 .cell{{padding:12px 14px;vertical-align:top;white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#374151;}}
 .cell-status{{width:6%;text-align:center;}}
-.cell-serif{{width:24%;}}
-.cell-note{{width:10%;color:#6B7280;font-size:.85em;}}
-.cell-result{{width:60%;}}
+.cell-serif{{width:{'18%' if _has_assessment else '24%'};}}
+.cell-note{{width:9%;color:#6B7280;font-size:.85em;}}
+.cell-assessment{{width:{'17%' if _has_assessment else '0'};}}
+.cell-result{{width:{'50%' if _has_assessment else '61%'};}}
 .badge{{display:inline-block;padding:.25em .65em;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.03em;white-space:nowrap;}}
 .badge-ok{{background:#DCFCE7;color:#15803D;}}
 .badge-ng{{background:#FEF3C7;color:#B45309;}}
+.acard{{background:#F8FAFF;border:1px solid #DBEAFE;border-radius:6px;padding:6px 8px;margin-bottom:5px;font-size:.82em;}}
+.acard:last-child{{margin-bottom:0;}}
+.anum{{font-weight:700;color:#1D4ED8;margin-bottom:2px;}}
+.adetail{{color:#374151;line-height:1.5;white-space:normal;}}
 .copy-btn{{background:none;border:1px solid #E2E8F0;border-radius:4px;padding:.12em .55em;cursor:pointer;font-size:.72rem;color:#94A3B8;float:right;margin-left:.5rem;line-height:1.5;transition:all .15s;white-space:nowrap;}}
 .copy-btn:hover{{background:#EFF6FF;color:#3B82F6;border-color:#93C5FD;}}
 </style>
 </head><body>
 <table>
-<thead><tr><th>判定</th><th>セリフ</th><th>注釈</th><th>チェック結果</th></tr></thead>
+<thead><tr><th>判定</th><th>セリフ</th><th>注釈</th>{_assessment_th}<th>チェック結果</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
 <script>
