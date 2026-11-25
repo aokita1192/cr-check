@@ -194,6 +194,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
   const dragStartWidth = useRef(400)
 
   // 動画プレイヤー状態（カスタムコントロール）
+  const [videoError, setVideoError] = useState<string | null>(null)
   const [curTime, setCurTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [playing, setPlaying] = useState(false)
@@ -722,9 +723,24 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                 onSeeked={e => handleSeeked(e.currentTarget)}
                 onLoadedMetadata={e => setDuration(e.currentTarget.duration || 0)}
                 onDurationChange={e => setDuration(e.currentTarget.duration || 0)}
+                onError={() => {
+                  // 配信APIのエラー内容（Drive の上限超過など）を取得して表示する
+                  fetch(videoUrl, { headers: { Range: 'bytes=0-0' } })
+                    .then(r => (r.ok ? null : r.json().catch(() => null)))
+                    .then(j => setVideoError(j?.error ?? '動画を読み込めませんでした。時間をおいて再度お試しください。'))
+                    .catch(() => setVideoError('動画を読み込めませんでした。通信状況を確認してください。'))
+                }}
+                onLoadedData={() => setVideoError(null)}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
               />
+
+              {videoError && (
+                <div role="alert" className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 p-8 text-center bg-[#08090B]/90">
+                  <AlertCircle className="w-10 h-10 text-[#FF9A9A]" aria-hidden />
+                  <p className="text-sm text-[#ECEEF2] max-w-xs leading-relaxed">{videoError}</p>
+                </div>
+              )}
 
               {/* ホバーコメントの範囲ハイライト（常時表示、pointer-events-none） */}
               {hoveredRegion && (

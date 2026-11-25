@@ -60,6 +60,13 @@ export async function GET(
     }
 
     if (!driveResponse.ok && driveResponse.status !== 206) {
+      const body = await driveResponse.text().catch(() => '')
+      if (body.includes('downloadQuotaExceeded') || body.includes('quota')) {
+        return NextResponse.json(
+          { error: 'Google Drive のダウンロード上限に達しています。時間をおいて再度開くか、動画ファイルをアップロードして追加してください。' },
+          { status: 429 }
+        )
+      }
       return NextResponse.json(
         { error: `Drive からの取得に失敗しました (HTTP ${driveResponse.status})` },
         { status: driveResponse.status }
