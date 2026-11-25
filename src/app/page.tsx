@@ -18,7 +18,7 @@ function detectUrlType(url: string): { label: string; icon: React.ReactNode } | 
 
 export default function Home() {
   const router = useRouter()
-  const [videoSubTab, setVideoSubTab] = useState<VideoSubTab>('upload')
+  const [videoSubTab, setVideoSubTab] = useState<VideoSubTab>('url')
 
   // 動画アップロード
   const [videoFile, setVideoFile] = useState<File | null>(null)
