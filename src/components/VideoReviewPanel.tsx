@@ -4,11 +4,9 @@ import Link from 'next/link'
 import dynamic from 'next/dynamic'
 import { useRef, useState, useEffect, useCallback, useLayoutEffect } from 'react'
 import {
-  MessageSquarePlus, Clock, Film, Copy, Check,
-  AlertCircle, Loader2, Car, Trash2, Pencil, X, PenLine, Home,
-  Reply, ClipboardList, Type,
+  Clock, Film, Copy, Check, AlertCircle, Loader2, Trash2, Pencil, X, Home,
+  Reply, ClipboardList, ScanLine, Play, Pause, SkipBack, SkipForward, Plus,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import type { Comment } from '@/lib/supabase'
 import type { DetectResult } from '@/app/api/detect-car/route'
 import type { EvidenceCheckResult } from '@/app/api/check-evidence/route'
@@ -63,6 +61,82 @@ function formatTime(sec: number) {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9A87FF]'
+
+type AiTab = 'car' | 'evidence' | 'annotation'
+type AiStatus = 'idle' | 'busy' | 'pass' | 'fail' | 'none' | 'error'
+
+function formatTimeMs(sec: number) {
+  const m = Math.floor(sec / 60)
+  const s = sec - m * 60
+  return `${m}:${s.toFixed(1).padStart(4, '0')}`
+}
+
+function formatDate(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const p = (n: number) => n.toString().padStart(2, '0')
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function StatusPill({ s }: { s: AiStatus }) {
+  if (s === 'pass') return <span className="inline-flex items-center h-[22px] px-2 rounded-full bg-[#5BE3A0]/15 text-[#5BE3A0] text-xs">合格</span>
+  if (s === 'fail') return <span className="inline-flex items-center h-[22px] px-2 rounded-full bg-[#FF6B6B]/15 text-[#FF9A9A] text-xs">不合格</span>
+  if (s === 'busy') return <span className="text-xs text-[#B4B9C4]">判定中</span>
+  if (s === 'none') return <span className="text-xs text-[#8F95A3]">検出なし</span>
+  if (s === 'error') return <span className="text-xs text-[#FF9A9A]">失敗</span>
+  return <span className="text-xs text-[#8F95A3]">未実施</span>
+}
+
+function ResultBadge({ ok, na }: { ok: boolean | null; na?: string }) {
+  if (ok === true) return <span className="inline-flex items-center justify-center gap-1 h-[26px] rounded-full bg-[#5BE3A0]/15 text-[#5BE3A0] text-xs font-bold"><Check className="w-3 h-3" strokeWidth={3} aria-hidden />一致</span>
+  if (ok === false) return <span className="inline-flex items-center justify-center gap-1 h-[26px] rounded-full bg-[#FF6B6B]/15 text-[#FF9A9A] text-xs font-bold"><X className="w-3 h-3" strokeWidth={3} aria-hidden />不一致</span>
+  return <span className="inline-flex items-center justify-center h-[26px] rounded-full bg-[#1D2027] text-[#B4B9C4] text-xs">{na ?? '対象外'}</span>
+}
+
+function Banner({ pass, title, body }: { pass: boolean; title: string; body: string }) {
+  const c = pass ? '91,227,160' : '255,107,107'
+  return (
+    <div className="flex items-center gap-4 p-4 rounded-xl" style={{ background: `rgba(${c},.09)`, border: `1px solid rgba(${c},.35)` }}>
+      <div className="flex-none w-11 h-11 rounded-full flex items-center justify-center" style={{ background: pass ? '#3DD68C' : '#FF6B6B', color: pass ? '#06281A' : '#2A0808' }}>
+        {pass ? <Check className="w-6 h-6" strokeWidth={3} aria-hidden /> : <X className="w-6 h-6" strokeWidth={3} aria-hidden />}
+      </div>
+      <div className="flex flex-col gap-0.5 min-w-0">
+        <span className="text-[22px] font-bold leading-tight" style={{ color: pass ? '#5BE3A0' : '#FF9A9A' }}>{title}</span>
+        {body && <span className="text-sm text-[#B4B9C4]">{body}</span>}
+      </div>
+    </div>
+  )
+}
+
+type CarRow = { label: string; frame: string | null; ref: string | null; ok: boolean | null; na?: string }
+
+type CarResult = DetectResult & { year_match?: boolean | null; mileage_match?: boolean | null }
+
+function buildCarRows(p: CarResult): CarRow[] {
+  const vName = p.model ? `${p.maker ?? ''} ${p.model}`.trim() : (p.matched_vehicle ?? p.detected_text)
+  const year = p.year ? `${p.year}年式` : null
+  const isBid = !!p.frame_diff_claim || (!!p.assessment_date && !p.frame_price && !p.frame_trade)
+  const common: CarRow[] = [
+    { label: '査定実績ナンバー', frame: null, ref: p.matched_row, ok: null, na: '照合キー' },
+    { label: '車種', frame: vName || null, ref: p.matched_vehicle, ok: p.vehicle_match },
+    { label: '年式', frame: year, ref: p.year_match ? year : null, ok: p.year_match ?? null, na: p.year_match == null && year ? '未判定' : undefined },
+    { label: '走行距離', frame: p.mileage, ref: p.mileage_match ? p.mileage : null, ok: p.mileage_match ?? null, na: p.mileage_match == null && p.mileage ? '未判定' : undefined },
+  ]
+  if (isBid) {
+    return [
+      ...common,
+      { label: '査定年月', frame: p.assessment_date, ref: null, ok: null },
+      { label: '主張差額', frame: p.frame_diff_claim, ref: p.calculated_diff, ok: p.vehicle_match ? p.price_match : null },
+    ]
+  }
+  return [
+    ...common,
+    { label: '売却価格', frame: p.frame_price, ref: p.sheet_price_sell, ok: p.vehicle_match && p.frame_price ? p.price_match : null },
+    { label: '下取り額', frame: p.frame_trade, ref: p.sheet_price_trade, ok: p.vehicle_match && p.frame_trade ? p.price_match : null },
+  ]
+}
+
 function captureVideoFrame(video: HTMLVideoElement): string | null {
   if (!video || video.videoWidth === 0) return null
   const maxWidth = 800  // 小さくしてトークン削減 → 高速化
@@ -105,16 +179,20 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
   const [submitting, setSubmitting] = useState(false)
 
   // 横パネルリサイズ（コメント一覧幅）
-  const [panelWidth, setPanelWidth] = useState(320)
+  const [panelWidth, setPanelWidth] = useState(400)
   const isDraggingH = useRef(false)
   const dragStartX = useRef(0)
-  const dragStartWidth = useRef(320)
+  const dragStartWidth = useRef(400)
 
-  // 縦パネルリサイズ（AI判定エリア高さ）
-  const [aiPanelHeight, setAiPanelHeight] = useState(240)
-  const isDraggingV = useRef(false)
-  const dragStartY = useRef(0)
-  const dragStartHeight = useRef(240)
+  // 動画プレイヤー状態（カスタムコントロール）
+  const [curTime, setCurTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [rate, setRate] = useState(1)
+
+  // AI判定タブ
+  const [aiTab, setAiTab] = useState<AiTab>('car')
+  const [addedAi, setAddedAi] = useState(false)
 
   useLayoutEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -122,14 +200,9 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
         const delta = dragStartX.current - e.clientX
         setPanelWidth(Math.max(220, Math.min(600, dragStartWidth.current + delta)))
       }
-      if (isDraggingV.current) {
-        const delta = dragStartY.current - e.clientY
-        setAiPanelHeight(Math.max(120, Math.min(500, dragStartHeight.current + delta)))
-      }
     }
     const onUp = () => {
       isDraggingH.current = false
-      isDraggingV.current = false
       document.body.style.cursor = ''
     }
     window.addEventListener('mousemove', onMove)
@@ -206,9 +279,8 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
 
   const handleOverlayMouseUp = useCallback((e: React.MouseEvent) => {
     if (!dragStart || !annotateMode) return
-    const video = nativeVideoRef.current
     const container = videoContainerRef.current
-    if (!video || !container) return
+    if (!container) return
 
     const coords = getContainerCoords(e)
     const finalRect: Region = {
@@ -224,8 +296,10 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
     // ドラッグが小さすぎる場合はキャンセル
     if (finalRect.x2 - finalRect.x1 < 0.02 && finalRect.y2 - finalRect.y1 < 0.02) return
 
-    video.pause()
+    const video = nativeVideoRef.current
+    if (video) video.pause()
 
+    const currentTime = video?.currentTime ?? 0
     const cRect = container.getBoundingClientRect()
     const POPUP_W = 296
     const POPUP_H = 220
@@ -237,7 +311,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
       ? selBottom + 12                                   // 選択範囲の下
       : Math.max(8, selTop - POPUP_H - 8)               // 上・最小8pxでクランプ
 
-    setAnnotation({ popupX, popupY, rect: finalRect, time: video.currentTime, text: '' })
+    setAnnotation({ popupX, popupY, rect: finalRect, time: currentTime, text: '' })
   }, [dragStart, annotateMode, getContainerCoords])
 
   const handleAnnotationSubmit = useCallback(async () => {
@@ -449,57 +523,182 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
     ? parseComment(comments.find(c => c.id === hoveredCommentId)?.content ?? '').region
     : null
 
-  return (
-    <div className="flex flex-col lg:flex-row h-screen">
-      {/* 動画プレイヤーエリア */}
-      <div className="flex-1 flex flex-col bg-black min-w-0">
+  // ---- カスタム動画コントロール ----
+  const togglePlay = () => {
+    const v = nativeVideoRef.current
+    if (!v) return
+    if (v.paused) void v.play(); else v.pause()
+  }
+  const stepFrame = (dir: 1 | -1) => {
+    const v = nativeVideoRef.current
+    if (!v) return
+    v.pause()
+    v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + dir / 30))
+  }
+  const cycleRate = () => {
+    const rates = [0.5, 1, 1.5, 2]
+    const next = rates[(rates.indexOf(rate) + 1) % rates.length]
+    setRate(next)
+    if (nativeVideoRef.current) nativeVideoRef.current.playbackRate = next
+  }
+  const seekTo = (sec: number) => {
+    if (nativeVideoRef.current) nativeVideoRef.current.currentTime = sec
+    setCurTime(sec)
+  }
+  const toggleAnnotate = () => {
+    setAnnotateMode(v => !v)
+    setAnnotation(null); setDragStart(null); setDragRect(null)
+  }
 
-        {/* ヘッダー */}
-        <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 shrink-0">
-          <div className="flex items-center gap-2">
-            {/* ホームボタン */}
-            <Link
-              href="/"
-              className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-              title="ホームに戻る"
-            >
-              <Home className="w-4 h-4" />
-            </Link>
-            <span className="text-zinc-700 text-sm">|</span>
-            <Film className="w-4 h-4 text-violet-400" />
-            <span className="text-sm font-medium text-zinc-300">動画レビュー</span>
-            {/* アノテーションモード切替 */}
-            {mode === 'native' && (
-              <button
-                onClick={() => { setAnnotateMode(v => !v); setAnnotation(null); setDragStart(null); setDragRect(null) }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                  annotateMode
-                    ? 'bg-red-600 text-white'
-                    : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'
-                }`}
-              >
-                <PenLine className="w-3.5 h-3.5" />
-                {annotateMode ? '範囲選択中' : '範囲を指摘'}
-              </button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={handleCopyUrl} className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition-colors">
-              {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-              {copied ? 'コピーしました' : 'URLをコピー'}
-            </button>
-            <UserMenu />
+  // ---- AI判定: 現在タブの判定を実行 ----
+  const runAi = () => {
+    if (aiTab === 'car') void handleDetectCar()
+    else if (aiTab === 'evidence') void handleCheckEvidence()
+    else void handleCheckAnnotation()
+  }
+  const aiBusy = aiTab === 'car' ? detectingCar : aiTab === 'evidence' ? checkingEvidence : checkingAnnotation
+
+  const carResults = carDetectResult?.parsed ?? null
+  const carPass = carResults ? carResults.every(p => p.vehicle_match && p.price_match !== false) : null
+  const evResults = evidenceResult?.parsed ?? null
+  const evPass = evResults && evResults.length > 0
+    ? evResults.every(r => r.status === '合格' || r.status === '対象外' || r.status === '査定実績で確認')
+    : null
+  const anResults = annotationResult?.parsed ?? null
+  const anPass = anResults && anResults.length > 0 ? anResults.every(a => a.status === '合格') : null
+
+  const tabStatus = (t: AiTab): AiStatus => {
+    if (t === 'car') {
+      if (detectingCar) return 'busy'
+      if (detectError) return 'error'
+      if (!carDetectResult) return 'idle'
+      return carPass === null ? 'none' : carPass ? 'pass' : 'fail'
+    }
+    if (t === 'evidence') {
+      if (checkingEvidence) return 'busy'
+      if (evidenceError) return 'error'
+      if (!evidenceResult) return 'idle'
+      return evPass === null ? 'none' : evPass ? 'pass' : 'fail'
+    }
+    if (checkingAnnotation) return 'busy'
+    if (annotationError) return 'error'
+    if (!annotationResult) return 'idle'
+    return anPass === null ? 'none' : anPass ? 'pass' : 'fail'
+  }
+
+  const frameTime = aiTab === 'car' ? carDetectResult?.time
+    : aiTab === 'evidence' ? evidenceResult?.time : annotationResult?.time
+
+  // 不一致結果をそのまま修正コメントにする
+  const addAiComment = async (time: number, text: string) => {
+    if (!text.trim()) return
+    await fetch('/api/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, time_sec: time, content: `[C:red]${text.trim()}` }),
+    })
+    setAddedAi(true)
+    setTimeout(() => setAddedAi(false), 2000)
+    fetchComments()
+  }
+
+  const topComments = comments.filter(c => !parseComment(c.content).replyTo)
+  const markerPcts = duration > 0
+    ? topComments.map(c => Math.min(100, (c.time_sec / duration) * 100))
+    : []
+  const progressPct = duration > 0 ? Math.min(100, (curTime / duration) * 100) : 0
+
+  const aiCommentDraft = (): { time: number; text: string } | null => {
+    if (aiTab === 'car' && carDetectResult && carResults) {
+      const lines = carResults.flatMap(p => [
+        ...buildCarRows(p).filter(r => r.ok === false)
+          .map(r => `【${r.label}】動画「${r.frame ?? '表記なし'}」→ 基準「${r.ref ?? '—'}」`),
+        p.reason,
+      ]).filter(Boolean)
+      return { time: carDetectResult.time, text: lines.join('\n') }
+    }
+    if (aiTab === 'evidence' && evidenceResult && evResults) {
+      const lines = evResults
+        .filter(r => !(r.status === '合格' || r.status === '対象外' || r.status === '査定実績で確認'))
+        .map(r => `【エビデンス】${r.claim_in_frame}：${r.reason}`)
+      return { time: evidenceResult.time, text: lines.join('\n') }
+    }
+    if (aiTab === 'annotation' && annotationResult && anResults) {
+      const lines = anResults.filter(a => a.status !== '合格')
+        .map(a => `【注釈サイズ】${a.reason}${a.estimated_px > 0 ? `（推定 ${a.estimated_px}px / 基準 ${a.min_pt}〜${a.max_pt}pt）` : ''}`)
+      return { time: annotationResult.time, text: lines.join('\n') }
+    }
+    return null
+  }
+
+  const annotateBtn = (
+    <button
+      type="button"
+      onClick={toggleAnnotate}
+      aria-pressed={annotateMode}
+      className={`h-11 px-3.5 rounded-[10px] text-sm font-bold inline-flex items-center gap-2 cursor-pointer transition-colors ${FOCUS} ${
+        annotateMode ? 'bg-[#FFB020] text-[#1A1200] ring-2 ring-white/40' : 'bg-[#FFB020] text-[#1A1200] hover:bg-[#FFC050]'
+      }`}
+    >
+      <ScanLine className="w-[18px] h-[18px]" aria-hidden />
+      {annotateMode ? '範囲選択中' : '範囲コメント'}
+    </button>
+  )
+
+  const hint = (t: string) => <p className="text-sm text-[#8F95A3]">{t}</p>
+  const ghostBtn = `h-9 px-3 rounded-lg border border-[#2A2E37] bg-[#1D2027] text-[#ECEEF2] text-[13px] font-medium hover:bg-[#262A33] disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS}`
+
+  return (
+    <div className="flex flex-col h-screen bg-[#0E0F13] text-[#ECEEF2]">
+      <header className="h-14 shrink-0 px-5 flex items-center justify-between border-b border-[#2A2E37] bg-[#16181D]">
+        <div className="flex items-center gap-3.5">
+          <Link
+            href="/"
+            aria-label="ホームへ戻る"
+            className={`w-9 h-9 rounded-lg border border-[#2A2E37] flex items-center justify-center text-[#B4B9C4] hover:bg-[#1D2027] hover:text-white transition-colors ${FOCUS}`}
+          >
+            <Home className="w-[18px] h-[18px]" aria-hidden />
+          </Link>
+          <div className="flex items-center gap-2.5">
+            <Film className="w-5 h-5 text-[#A794FF]" aria-hidden />
+            <span className="text-[15px] font-bold">
+              動画レビュー
+            </span>
           </div>
         </div>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={handleCopyUrl} className={`h-9 px-3.5 rounded-lg border border-[#2A2E37] bg-[#16181D] text-[13px] font-medium inline-flex items-center gap-2 hover:bg-[#1D2027] ${FOCUS}`}>
+            {copied ? <Check className="w-4 h-4 text-[#5BE3A0]" aria-hidden /> : <Copy className="w-4 h-4" aria-hidden />}
+            {copied ? 'コピーしました' : 'レビューURLをコピー'}
+          </button>
+          <UserMenu />
+        </div>
+      </header>
 
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        {/* 1: 動画 */}
+        <div
+          className={`min-w-0 overflow-hidden bg-[#08090B] ${canAIFeatures ? 'lg:w-[clamp(400px,32vw,560px)] lg:flex-none' : 'flex-1'}`}
+          style={{ display: 'grid', gridTemplateRows: 'minmax(0, 1fr) auto', minHeight: 0 }}
+        >
         {/* プレイヤー */}
         <div
           ref={mode === 'native' ? videoContainerRef : undefined}
-          className="flex-1 flex items-center justify-center bg-black overflow-hidden relative"
+          className={`bg-[#08090B] relative overflow-hidden flex items-center justify-center`}
         >
+          {/* 動画ネイティブ再生 */}
           {mode === 'native' && (
             <>
-              <video ref={nativeVideoRef} src={videoUrl} controls className="w-full h-full" style={{ maxHeight: '100%' }} />
+              <video
+                ref={nativeVideoRef} src={videoUrl} playsInline
+                className="w-full h-full" style={{ maxHeight: '100%' }}
+                onClick={togglePlay}
+                onTimeUpdate={e => setCurTime(e.currentTarget.currentTime)}
+                onLoadedMetadata={e => setDuration(e.currentTarget.duration || 0)}
+                onDurationChange={e => setDuration(e.currentTarget.duration || 0)}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+              />
 
               {/* ホバーコメントの範囲ハイライト（常時表示、pointer-events-none） */}
               {hoveredRegion && (
@@ -510,9 +709,9 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                     top: `${hoveredRegion.y1 * 100}%`,
                     width: `${(hoveredRegion.x2 - hoveredRegion.x1) * 100}%`,
                     height: `${(hoveredRegion.y2 - hoveredRegion.y1) * 100}%`,
-                    border: '2px solid #ef4444',
-                    background: 'rgba(239,68,68,0.15)',
-                    boxShadow: '0 0 0 1px rgba(239,68,68,0.4)',
+                    border: '2px solid #FFB020',
+                    background: 'rgba(255,176,32,0.14)',
+                    boxShadow: '0 0 0 1px rgba(255,176,32,0.4)',
                   }}
                 />
               )}
@@ -522,7 +721,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                 <div
                   className="absolute inset-x-0 top-0 z-20 select-none"
                   style={{
-                    bottom: 56,
+                    bottom: 0,
                     cursor: 'crosshair',
                     pointerEvents: annotation ? 'none' : 'auto',
                   }}
@@ -540,8 +739,8 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                         top: `${dragRect.y1 * 100}%`,
                         width: `${(dragRect.x2 - dragRect.x1) * 100}%`,
                         height: `${(dragRect.y2 - dragRect.y1) * 100}%`,
-                        border: '2px solid #ef4444',
-                        background: 'rgba(239,68,68,0.12)',
+                        border: '2px solid #FFB020',
+                        background: 'rgba(255,176,32,0.12)',
                       }}
                     />
                   )}
@@ -563,8 +762,8 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                     top: `${annotation.rect.y1 * 100}%`,
                     width: `${(annotation.rect.x2 - annotation.rect.x1) * 100}%`,
                     height: `${(annotation.rect.y2 - annotation.rect.y1) * 100}%`,
-                    border: '2px solid #ef4444',
-                    background: 'rgba(239,68,68,0.15)',
+                    border: '2px solid #FFB020',
+                    background: 'rgba(255,176,32,0.14)',
                   }}
                 />
               )}
@@ -604,12 +803,12 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                         if (e.key === 'Escape') setAnnotation(null)
                       }}
                       placeholder="指摘内容を入力..."
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 resize-none"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-[#9A87FF] resize-none"
                     />
                     <button
                       onClick={handleAnnotationSubmit}
                       disabled={!annotation.text.trim()}
-                      className="mt-2 w-full py-2 rounded-lg text-sm font-medium text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-red-600 hover:bg-red-500"
+                      className="mt-2 w-full py-2 rounded-lg text-sm font-medium text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-[#6F4CFF] hover:bg-[#7F60FF]"
                     >
                       コメントを追加
                     </button>
@@ -644,23 +843,49 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
             </div>
           )}
         </div>
+        {/* 下部コントロール */}
+        <div className="bg-[#16181D]">
+          {mode === 'native' && (
+            <>
+              <div className="h-16 px-5 flex items-center gap-3 bg-[#0E0F13]">
+                <span className="font-mono text-[13px] font-medium w-[50px] tabular-nums">{formatTimeMs(curTime)}</span>
+                <div className="flex-1 relative h-7 flex items-center focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-[#9A87FF] rounded">
+                  <div className="absolute inset-x-0 h-2 rounded bg-[#2A2E37]" />
+                  <div className="absolute left-0 h-2 rounded bg-[#6F4CFF]" style={{ width: `${progressPct}%` }} />
+                  {markerPcts.map((m, i) => (
+                    <div key={i} className="absolute top-0 w-[3px] h-3 rounded-sm bg-[#FFB020]" style={{ left: `${m}%` }} />
+                  ))}
+                  <div className="absolute w-4 h-4 -ml-2 rounded-full bg-white shadow-[0_0_0_3px_rgba(111,76,255,.45)]" style={{ left: `${progressPct}%` }} />
+                  <input
+                    type="range" aria-label="再生位置"
+                    min={0} max={duration || 0} step={0.01} value={Math.min(curTime, duration || 0)}
+                    onChange={e => seekTo(Number(e.target.value))}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                </div>
+                <span className="font-mono text-[13px] font-medium text-[#8F95A3] w-10 text-right tabular-nums">{formatTime(duration)}</span>
+              </div>
+              <div className="h-[72px] px-5 flex items-center gap-2 border-t border-[#2A2E37]">
+                <button type="button" aria-label="1コマ戻る" onClick={() => stepFrame(-1)} className={`w-11 h-11 rounded-[10px] border border-[#2A2E37] bg-[#1D2027] flex items-center justify-center hover:bg-[#262A33] ${FOCUS}`}><SkipBack className="w-[18px] h-[18px]" aria-hidden /></button>
+                <button type="button" aria-label={playing ? '一時停止' : '再生'} onClick={togglePlay} className={`w-12 h-12 rounded-full bg-[#6F4CFF] text-white flex items-center justify-center hover:bg-[#7F60FF] ${FOCUS}`}>
+                  {playing ? <Pause className="w-5 h-5" fill="currentColor" aria-hidden /> : <Play className="w-5 h-5" fill="currentColor" aria-hidden />}
+                </button>
+                <button type="button" aria-label="1コマ進む" onClick={() => stepFrame(1)} className={`w-11 h-11 rounded-[10px] border border-[#2A2E37] bg-[#1D2027] flex items-center justify-center hover:bg-[#262A33] ${FOCUS}`}><SkipForward className="w-[18px] h-[18px]" aria-hidden /></button>
+                <button type="button" aria-label="再生速度" onClick={cycleRate} className={`h-11 px-2.5 rounded-[10px] border border-[#2A2E37] bg-[#1D2027] font-mono text-[13px] font-medium hover:bg-[#262A33] ${FOCUS}`}>{rate.toFixed(1)}×</button>
+                <div className="flex-1" />
+                {annotateBtn}
+              </div>
+            </>
+          )}
 
-        {/* 下部パネル */}
-        <div className="border-t border-zinc-800 bg-zinc-900 shrink-0">
           {mode === 'react-player' && (
-            <div className="p-4">
+            <div className="p-4 border-t border-[#2A2E37]">
               <div className="flex gap-2 mb-3">
-                <button
-                  onClick={handleStampCurrentTime}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-zinc-300 transition-colors"
-                >
-                  <Clock className="w-4 h-4 text-violet-400" />
-                  現在時刻を記録
+                <button type="button" onClick={handleStampCurrentTime} className={`h-10 px-3.5 rounded-[10px] border border-[#2A2E37] bg-[#1D2027] text-sm inline-flex items-center gap-2 hover:bg-[#262A33] ${FOCUS}`}>
+                  <Clock className="w-4 h-4 text-[#A794FF]" aria-hidden />現在時刻を記録
                 </button>
                 {stampedTime !== null && (
-                  <span className="flex items-center px-3 py-2 bg-violet-900/40 border border-violet-700 rounded-lg text-sm text-violet-300 font-mono">
-                    {formatTime(stampedTime)}
-                  </span>
+                  <span className="flex items-center px-3 rounded-[10px] bg-[#FFB020]/15 text-[#FFB020] text-sm font-mono">{formatTime(stampedTime)}</span>
                 )}
               </div>
               <div className="flex gap-2">
@@ -672,342 +897,177 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                   onKeyDown={e => { if (e.key === 'Enter' && !isComposing) handleSubmit() }}
                   placeholder={stampedTime === null ? 'まず「現在時刻を記録」してください' : 'コメントを入力...'}
                   disabled={stampedTime === null}
-                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 disabled:opacity-40"
+                  aria-label="コメント"
+                  className={`flex-1 h-10 rounded-[10px] border border-[#2A2E37] bg-[#0E0F13] px-3 text-sm placeholder:text-[#8F95A3] disabled:opacity-40 ${FOCUS}`}
                 />
-                <Button
-                  onClick={handleSubmit}
+                <button
+                  type="button" onClick={handleSubmit}
                   disabled={!newComment.trim() || stampedTime === null || submitting}
-                  size="sm" className="bg-red-600 hover:bg-red-500 text-white"
-                >追加</Button>
+                  className={`h-10 px-4 rounded-[10px] bg-[#6F4CFF] text-white text-sm font-bold hover:bg-[#7F60FF] disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS}`}
+                >追加</button>
               </div>
             </div>
           )}
+
           {(mode === 'drive-file' || mode === 'drive-folder') && (
-            <div className="p-4">
-              <p className="text-zinc-500 text-sm text-center">このプレイヤーではタイムスタンプ機能は使用できません</p>
+            <div className="p-4 border-t border-[#2A2E37]">
+              <p className="text-[#8F95A3] text-sm text-center">このプレイヤーではタイムスタンプ機能は使用できません</p>
             </div>
           )}
 
-          {/* AI 車種判定 */}
-          {canAIFeatures && (
-            <div
-              className="shrink-0 border-t border-zinc-700/50 flex flex-col overflow-hidden"
-              style={{ height: aiPanelHeight }}
-            >
-              {/* 縦リサイズハンドル */}
-              <div
-                className="h-1.5 bg-zinc-700 hover:bg-violet-600 cursor-row-resize shrink-0 transition-colors"
-                onMouseDown={e => {
-                  e.preventDefault()
-                  isDraggingV.current = true
-                  dragStartY.current = e.clientY
-                  dragStartHeight.current = aiPanelHeight
-                  document.body.style.cursor = 'row-resize'
-                }}
-              />
-            <div className="px-4 pb-4 pt-3 flex-1 overflow-y-auto">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="flex items-center gap-2">
-                  <Car className="w-4 h-4 text-blue-400" />
-                  <span className="font-medium text-zinc-400" style={{ fontSize: 14 }}>AI車種判定</span>
-                </div>
-                <Button
-                  onClick={handleDetectCar}
-                  disabled={detectingCar}
-                  size="sm"
-                  className="bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-40"
-                >
-                  {detectingCar
-                    ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />判定中</>
-                    : <><Car className="w-3.5 h-3.5 mr-1" />車種判定</>
-                  }
-                </Button>
+        </div>
+        </div>
+
+        {/* 2: AI判定 */}
+        {canAIFeatures && (
+          <section className="lg:flex-none lg:w-[clamp(420px,39vw,560px)] min-h-0 px-6 py-5 border-x border-[#2A2E37] bg-[#16181D] flex flex-col gap-4 overflow-y-auto">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-baseline gap-2.5">
+                <h2 className="text-base font-bold">AI判定</h2>
+                <span className="text-[13px] text-[#8F95A3]">{formatTime(frameTime ?? curTime)} のフレーム</span>
               </div>
+              <button
+                type="button" onClick={runAi} disabled={aiBusy}
+                className={`h-10 px-4 rounded-[10px] bg-[#6F4CFF] text-white text-sm font-bold inline-flex items-center gap-2 hover:bg-[#7F60FF] disabled:opacity-60 disabled:cursor-wait ${FOCUS}`}
+              >
+                {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <ScanLine className="w-4 h-4" aria-hidden />}
+                {aiBusy ? '判定中...' : 'このフレームを判定'}
+              </button>
+            </div>
 
-              {detectError && (
-                <p className="text-red-400 text-sm">{detectError}</p>
-              )}
+            <div role="tablist" className="flex gap-1 p-1 rounded-xl bg-[#0E0F13] border border-[#2A2E37]">
+              {([['car', '車種'], ['evidence', 'エビデンス'], ['annotation', '注釈サイズ']] as [AiTab, string][]).map(([id, label]) => (
+                <button
+                  key={id} type="button" role="tab" aria-selected={aiTab === id}
+                  onClick={() => setAiTab(id)}
+                  className={`flex-1 h-10 rounded-lg text-sm flex items-center justify-center gap-2 border ${FOCUS} ${
+                    aiTab === id ? 'bg-[#1D2027] border-[#2A2E37] font-bold' : 'border-transparent text-[#B4B9C4] hover:text-white'
+                  }`}
+                >
+                  {label}<StatusPill s={tabStatus(id)} />
+                </button>
+              ))}
+            </div>
 
-              {!carDetectResult && !detectError && (
-                <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内のテキストを読み取り車種を照合します</p>
-              )}
-
-              {carDetectResult && (() => {
-
-                const results = carDetectResult.parsed
-                if (!results) {
+            {aiTab === 'car' && (
+              <div className="flex flex-col gap-4">
+                {detectError && <p role="alert" className="text-sm text-[#FF9A9A]">{detectError}</p>}
+                {!carDetectResult && !detectError && hint('動画を一時停止して「このフレームを判定」を押すと、フレーム内のテキストを読み取り車種を照合します')}
+                {carDetectResult && !carResults && (
+                  <div className="p-3 rounded-xl bg-[#1D2027] border border-[#2A2E37]">
+                    <p className="text-sm whitespace-pre-wrap">{carDetectResult.raw}</p>
+                  </div>
+                )}
+                {carResults && carResults.map((p, idx) => {
+                  const overall = p.vehicle_match && p.price_match !== false
                   return (
-                    <div className="mt-2 p-2.5 bg-zinc-800 rounded-lg border border-blue-800/30">
-                      <p className="text-blue-400 font-mono text-xs mb-1">{formatTime(carDetectResult.time)}</p>
-                      <p className="text-zinc-200 text-sm whitespace-pre-wrap">{carDetectResult.raw}</p>
+                    <div key={idx} className="flex flex-col gap-3">
+                      {carResults.length > 1 && <span className="text-[13px] text-[#8F95A3]">{idx + 1} / {carResults.length}</span>}
+                      <Banner pass={overall} title={overall ? '合格' : '不合格'} body={p.reason} />
+                      <div className="flex flex-col">
+                        <div className="grid grid-cols-[148px_1fr_1fr_84px] gap-3 px-1 pb-2 text-xs text-[#8F95A3]">
+                          <span>項目</span><span>動画の表記</span><span>基準（査定実績シート）</span><span>結果</span>
+                        </div>
+                        {buildCarRows(p).map((r, i, arr) => (
+                          <div key={r.label} className={`grid grid-cols-[148px_1fr_1fr_84px] gap-3 items-center min-h-11 px-1 py-1.5 border-t border-[#2A2E37] ${i === arr.length - 1 ? 'border-b' : ''}`}>
+                            <span className="text-[#B4B9C4]">{r.label}</span>
+                            <span className={r.frame ? 'break-words' : 'text-[#8F95A3]'}>{r.frame ?? '表記なし'}</span>
+                            <span className={r.ref ? 'break-words' : 'text-[#8F95A3]'}>{r.ref ?? '—'}</span>
+                            <ResultBadge ok={r.ok} na={r.na} />
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )
-                }
-                return (
-                  <div className="mt-2 space-y-2">
-                    {results.map((p, idx) => {
-                      const overallPass = p.vehicle_match && p.price_match !== false
-                      const vehicleName = p.model
-                        ? `${p.maker ?? ''} ${p.model}`.trim()
-                        : (p.matched_vehicle ?? p.detected_text)
-                      const isBidType = !!p.frame_diff_claim
-                      const rows: Array<{ label: string; ok: boolean | null; value: string }> = isBidType ? [
-                        // タイプB：入札差額フレーム
-                        { label: '合否', ok: overallPass, value: overallPass ? '合格' : '不合格' },
-                        { label: '車種', ok: p.vehicle_match, value: vehicleName },
-                        { label: '年式', ok: null, value: p.year ? `${p.year}年式` : '—' },
-                        { label: '走行距離', ok: null, value: p.mileage ?? '—' },
-                        { label: '査定年月', ok: null, value: p.assessment_date ?? '—' },
-                        {
-                          label: '主張差額',
-                          ok: p.vehicle_match ? p.price_match : null,
-                          value: p.frame_diff_claim
-                            ? `${p.frame_diff_claim}${p.calculated_diff ? ` → 実際 ${p.calculated_diff}` : ''}`
-                            : '—',
-                        },
-                      ] : [
-                        // タイプA：売却実績フレーム
-                        { label: '合否', ok: overallPass, value: overallPass ? '合格' : '不合格' },
-                        { label: '車種', ok: p.vehicle_match, value: vehicleName },
-                        { label: '年式', ok: null, value: p.year ? `${p.year}年式` : '—' },
-                        { label: '走行距離', ok: null, value: p.mileage ?? '—' },
-                        {
-                          label: '売却価格',
-                          ok: p.vehicle_match && p.frame_price ? p.price_match : null,
-                          value: p.frame_price
-                            ? `${p.frame_price}${p.sheet_price_sell ? ` → 基準 ${p.sheet_price_sell}` : ''}`
-                            : p.sheet_price_sell ? `基準 ${p.sheet_price_sell}` : '—',
-                        },
-                        {
-                          label: '下取り額',
-                          ok: p.vehicle_match && p.frame_trade ? p.price_match : null,
-                          value: p.frame_trade
-                            ? `${p.frame_trade}${p.sheet_price_trade ? ` → 基準 ${p.sheet_price_trade}` : ''}`
-                            : p.sheet_price_trade ? `基準 ${p.sheet_price_trade}` : '—',
-                        },
-                      ]
-                      return (
-                        <div key={idx} className="rounded-lg overflow-hidden border border-zinc-700">
-                          <div className="flex items-center gap-2 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
-                            <Clock className="w-3 h-3 text-blue-400" />
-                            <span className="text-blue-400 font-mono text-xs">{formatTime(carDetectResult.time)}</span>
-                            {results.length > 1 && (
-                              <span className="text-xs text-zinc-400 bg-zinc-700 px-1.5 py-0.5 rounded">{idx + 1}/{results.length}</span>
+                })}
+              </div>
+            )}
+
+            {aiTab === 'evidence' && (
+              <div className="flex flex-col gap-3">
+                {evidenceError && <p role="alert" className="text-sm text-[#FF9A9A]">{evidenceError}</p>}
+                {!evidenceResult && !evidenceError && hint('動画を一時停止して「このフレームを判定」を押すと、フレームの訴求内容をエビデンスリストと照合します')}
+                {evidenceResult && evPass === null && hint('このフレームに訴求内容は検出されませんでした')}
+                {evPass !== null && <Banner pass={evPass} title={evPass ? '合格' : '不合格'} body="" />}
+                {evResults && evResults.map((r, idx) => {
+                  const ok = r.status === '合格'
+                  const out = r.status === '対象外'
+                  const ref = r.status === '査定実績で確認'
+                  const tone = ok ? 'text-[#5BE3A0]' : ref ? 'text-[#7AB7FF]' : out ? 'text-[#B4B9C4]' : 'text-[#FF9A9A]'
+                  return (
+                    <div key={idx} className="rounded-xl border border-[#2A2E37] bg-[#1D2027] overflow-hidden">
+                      <div className="px-3.5 py-2.5 flex items-center gap-2.5 border-b border-[#2A2E37]">
+                        <span className={`text-sm font-bold ${tone}`}>{r.status}</span>
+                        <span className="text-sm flex-1">{r.claim_in_frame}</span>
+                        {r.evidence_no && <span className="text-xs font-mono text-[#FFB020] bg-[#FFB020]/10 px-1.5 py-0.5 rounded">{r.evidence_no}</span>}
+                      </div>
+                      <div className="px-3.5 py-2.5 flex flex-col gap-1 text-[13px]">
+                        {r.evidence_no && (
+                          <div className="flex gap-3"><span className="text-[#8F95A3] w-16 shrink-0">区分</span>
+                            <span>{r.evidence_category === 'A' ? 'A：根拠＋注釈が必要' : r.evidence_category === 'B' ? 'B：根拠のみ必要' : r.evidence_category === 'C' ? 'C：根拠・注釈不要' : r.evidence_category ?? '—'}</span></div>
+                        )}
+                        {r.expiry_date && (
+                          <div className="flex gap-3"><span className="text-[#8F95A3] w-16 shrink-0">使用期限</span>
+                            <span className={r.is_expired ? 'text-[#FF9A9A]' : ''}>{r.expiry_date}{r.is_expired ? '（期限切れ）' : '（有効）'}</span></div>
+                        )}
+                        <p className={tone}>{r.reason}</p>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {aiTab === 'annotation' && (
+              <div className="flex flex-col gap-3">
+                {annotationError && <p role="alert" className="text-sm text-[#FF9A9A]">{annotationError}</p>}
+                {!annotationResult && !annotationError && hint('動画を一時停止して「このフレームを判定」を押すと、フレーム内の注釈テキストサイズを判定します（合格基準：動画 16〜20px）')}
+                {annotationResult && anPass === null && hint('このフレームに注釈テキストは検出されませんでした')}
+                {anPass !== null && <Banner pass={anPass} title={anPass ? '合格' : '不合格'} body="" />}
+                {anResults && anResults.map((a, idx) => {
+                  const ok = a.status === '合格'
+                  const unk = a.status === '検出不可'
+                  return (
+                    <div key={idx} className="rounded-xl border border-[#2A2E37] bg-[#1D2027] overflow-hidden">
+                      <div className="px-3.5 py-2.5 flex items-center gap-2 border-b border-[#2A2E37]">
+                        <span className={`text-sm font-bold ${ok ? 'text-[#5BE3A0]' : unk ? 'text-[#B4B9C4]' : 'text-[#FF9A9A]'}`}>{a.status}</span>
+                        <span className="text-xs text-[#8F95A3] ml-auto">{a.video_format}</span>
+                      </div>
+                      <div className="px-3.5 py-2.5 flex flex-col gap-1.5 text-[13px]">
+                        {a.text_found && <div className="flex gap-3"><span className="text-[#8F95A3] w-24 shrink-0">検出テキスト</span><span>{a.text_found}</span></div>}
+                        {a.estimated_pt > 0 && (
+                          <>
+                            <div className="flex gap-3"><span className="text-[#8F95A3] w-24 shrink-0">推定サイズ</span><span className={`font-mono font-bold ${ok ? 'text-[#5BE3A0]' : 'text-[#FF9A9A]'}`}>約 {a.estimated_pt}pt（{a.estimated_px}px）</span></div>
+                            <div className="flex gap-3"><span className="text-[#8F95A3] w-24 shrink-0">合格ライン</span><span className="font-mono">{a.min_pt}〜{a.max_pt}pt（動画 16〜20px）</span></div>
+                            {!ok && a.estimated_px > 0 && (
+                              <p className="text-[#FFB020]">{a.estimated_px < 16 ? `→ 編集ソフトで ${a.min_pt}〜${a.max_pt}pt に引き上げてください` : '→ 注釈以外の要素を誤検出している可能性があります'}</p>
                             )}
-                            <span className="text-xs text-zinc-500 ml-auto">{p.matched_row ?? ''}</span>
-                          </div>
-                          <table className="w-full text-sm">
-                            <tbody>
-                              {rows.map(({ label, ok, value }) => (
-                                <tr key={label} className="border-b border-zinc-800 last:border-0">
-                                  <td className="px-3 py-2 text-zinc-500 text-xs whitespace-nowrap w-16">{label}</td>
-                                  <td className="px-2 py-2 text-center w-8">
-                                    {ok === true && <span className="text-green-400 font-bold text-base">○</span>}
-                                    {ok === false && <span className="text-red-400 font-bold text-base">✗</span>}
-                                    {ok === null && <span className="text-zinc-600 text-xs">—</span>}
-                                  </td>
-                                  <td className="px-2 py-2 text-zinc-200 text-xs">{value}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                          {p.reason && (
-                            <div className={`px-3 py-2 border-t border-zinc-700 ${overallPass ? 'bg-green-950/40' : 'bg-red-950/40'}`}>
-                              <p className={`text-xs ${overallPass ? 'text-green-400' : 'text-red-400'}`}>{p.reason}</p>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )
-              })()}
-
-              {/* エビデンス確認・注釈サイズ判定セクション */}
-              {canAIFeatures && (<>
-                <div className="mt-3 pt-3 border-t border-zinc-700/60">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 text-amber-400" />
-                      <span className="font-medium text-zinc-400" style={{ fontSize: 14 }}>エビデンス確認</span>
-                    </div>
-                    <Button
-                      onClick={handleCheckEvidence}
-                      disabled={checkingEvidence}
-                      size="sm"
-                      className="bg-amber-700 hover:bg-amber-600 text-white disabled:opacity-40"
-                    >
-                      {checkingEvidence
-                        ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />確認中</>
-                        : <><AlertCircle className="w-3.5 h-3.5 mr-1" />エビデンス確認</>
-                      }
-                    </Button>
-                  </div>
-
-                  {evidenceError && <p className="text-red-400 text-sm">{evidenceError}</p>}
-
-                  {!evidenceResult && !evidenceError && (
-                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレームの訴求内容をエビデンスリストと照合します</p>
-                  )}
-
-                  {evidenceResult && (() => {
-                    const evResults = evidenceResult.parsed
-                    if (!evResults || evResults.length === 0) {
-                      return <p className="text-zinc-500 text-sm mt-2">このフレームに訴求内容は検出されませんでした</p>
-                    }
-                    return (
-                      <div className="mt-2 space-y-2">
-                        <p className="text-amber-400/70 font-mono text-xs">{formatTime(evidenceResult.time)}</p>
-                        {evResults.map((r, idx) => {
-                          const isPass = r.status === '合格'
-                          const isOut = r.status === '対象外'
-                          const isJisseki = r.status === '査定実績で確認'
-                          return (
-                            <div key={idx} className="rounded-lg overflow-hidden border border-zinc-700">
-                              <div className={`px-3 py-2 border-b border-zinc-700 flex items-center gap-2 ${
-                                isPass ? 'bg-green-950/40' : isJisseki ? 'bg-blue-950/40' : isOut ? 'bg-zinc-800' : 'bg-red-950/40'
-                              }`}>
-                                <span className={`text-sm font-bold ${isPass ? 'text-green-400' : isJisseki ? 'text-blue-400' : isOut ? 'text-zinc-400' : 'text-red-400'}`}>
-                                  {isPass ? '○' : isJisseki ? '↗' : isOut ? '—' : '✗'}
-                                </span>
-                                <span className="text-zinc-200 text-xs flex-1">{r.claim_in_frame}</span>
-                                {r.evidence_no && (
-                                  <span className="text-amber-400 text-xs font-mono bg-amber-400/10 px-1.5 py-0.5 rounded">{r.evidence_no}</span>
-                                )}
-                              </div>
-                              <table className="w-full text-sm">
-                                <tbody>
-                                  {r.evidence_no && (
-                                    <tr className="border-b border-zinc-800">
-                                      <td className="px-3 py-1.5 text-zinc-500 text-xs whitespace-nowrap w-20">区分</td>
-                                      <td className="px-2 py-1.5 text-zinc-300 text-xs">
-                                        {r.evidence_category === 'A' ? 'A：根拠＋注釈が必要'
-                                          : r.evidence_category === 'B' ? 'B：根拠のみ必要'
-                                          : r.evidence_category === 'C' ? 'C：根拠・注釈不要'
-                                          : r.evidence_category ?? '—'}
-                                      </td>
-                                    </tr>
-                                  )}
-                                  {r.expiry_date && (
-                                    <tr>
-                                      <td className="px-3 py-1.5 text-zinc-500 text-xs whitespace-nowrap">使用期限</td>
-                                      <td className={`px-2 py-1.5 text-xs ${r.is_expired ? 'text-red-400' : 'text-zinc-300'}`}>
-                                        {r.expiry_date}{r.is_expired ? '（期限切れ）' : '（有効）'}
-                                      </td>
-                                    </tr>
-                                  )}
-                                </tbody>
-                              </table>
-                              <div className={`px-3 py-1.5 border-t border-zinc-700 ${
-                                isPass ? 'bg-green-950/30' : isJisseki ? 'bg-blue-950/30' : isOut ? 'bg-zinc-800/50' : 'bg-red-950/30'
-                              }`}>
-                                <p className={`text-xs ${isPass ? 'text-green-400' : isJisseki ? 'text-blue-400' : isOut ? 'text-zinc-500' : 'text-red-400'}`}>
-                                  {r.reason}
-                                </p>
-                              </div>
-                            </div>
-                          )
-                        })}
+                          </>
+                        )}
+                        <p className={ok ? 'text-[#5BE3A0]' : unk ? 'text-[#8F95A3]' : 'text-[#FF9A9A]'}>{a.reason}</p>
                       </div>
-                    )
-                  })()}
-                </div>
-
-                <div className="mt-3 pt-3 border-t border-zinc-700/60">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2">
-                      <Type className="w-4 h-4 text-violet-400" />
-                      <span className="font-medium text-zinc-400" style={{ fontSize: 14 }}>注釈サイズ判定</span>
                     </div>
-                    <Button
-                      onClick={handleCheckAnnotation}
-                      disabled={checkingAnnotation}
-                      size="sm"
-                      className="bg-violet-700 hover:bg-violet-600 text-white disabled:opacity-40"
-                    >
-                      {checkingAnnotation
-                        ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />判定中</>
-                        : <><Type className="w-3.5 h-3.5 mr-1" />注釈確認</>
-                      }
-                    </Button>
-                  </div>
+                  )
+                })}
+              </div>
+            )}
 
-                  {annotationError && <p className="text-red-400 text-sm">{annotationError}</p>}
-
-                  {!annotationResult && !annotationError && (
-                    <p className="text-zinc-600 text-sm">一時停止してボタンを押すと、フレーム内の注釈テキストサイズを判定します（合格基準：動画 16〜20px）</p>
-                  )}
-
-                  {annotationResult && (() => {
-                    const ants = annotationResult.parsed
-                    if (!ants || ants.length === 0) {
-                      return <p className="text-zinc-500 text-sm mt-2">このフレームに注釈テキストは検出されませんでした</p>
-                    }
-                    return (
-                      <div className="mt-2 space-y-2">
-                        <p className="text-violet-400/70 font-mono text-xs">{formatTime(annotationResult.time)}</p>
-                        {ants.map((a, idx) => {
-                          const isPass = a.status === '合格'
-                          const isUnknown = a.status === '検出不可'
-                          return (
-                            <div key={idx} className="rounded-lg overflow-hidden border border-zinc-700">
-                              <div className={`px-3 py-2 border-b border-zinc-700 flex items-center gap-2 ${
-                                isPass ? 'bg-green-950/40' : isUnknown ? 'bg-zinc-800' : 'bg-red-950/40'
-                              }`}>
-                                <span className={`text-base font-bold ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-400' : 'text-red-400'}`}>
-                                  {isPass ? '○ 合格' : isUnknown ? '— 検出不可' : '✗ 不合格'}
-                                </span>
-                                <span className="text-xs text-zinc-500 ml-auto shrink-0">{a.video_format}</span>
-                              </div>
-                              {a.text_found && (
-                                <div className="px-3 py-1.5 border-b border-zinc-800">
-                                  <span className="text-zinc-500 text-xs">検出テキスト：</span>
-                                  <span className="text-zinc-300 text-xs ml-1">{a.text_found}</span>
-                                </div>
-                              )}
-                              {a.estimated_pt > 0 && (
-                                <div className="px-3 py-2 border-b border-zinc-800">
-                                  <div className="flex items-center justify-between mb-1">
-                                    <span className="text-zinc-400 text-xs font-medium">推定フォントサイズ</span>
-                                    <span className={`text-sm font-mono font-bold ${isPass ? 'text-green-400' : 'text-red-400'}`}>
-                                      約 {a.estimated_pt}pt（{a.estimated_px}px）
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-zinc-500 text-xs">合格ライン</span>
-                                    <span className="text-xs font-mono text-zinc-400">
-                                      {a.min_pt}〜{a.max_pt}pt（動画 16〜20px）
-                                    </span>
-                                  </div>
-                                  {!isPass && a.estimated_px > 0 && (
-                                    <div className={`mt-1.5 px-2 py-1 rounded text-xs ${a.estimated_px < 16 ? 'bg-red-950/50 text-red-300' : 'bg-orange-950/50 text-orange-300'}`}>
-                                      {a.estimated_px < 16
-                                        ? `→ 編集ソフトで ${a.min_pt}〜${a.max_pt}pt に引き上げてください`
-                                        : '→ 注釈以外の要素を誤検出している可能性があります'}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                              <div className={`px-3 py-1.5 ${isPass ? 'bg-green-950/30' : isUnknown ? 'bg-zinc-800/50' : 'bg-red-950/30'}`}>
-                                <p className={`text-xs ${isPass ? 'text-green-400' : isUnknown ? 'text-zinc-500' : 'text-red-400'}`}>{a.reason}</p>
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )
-                  })()}
-                </div>
-              </>)}
+            <div className="mt-auto flex items-center justify-between gap-3 pt-2">
+              <span className="text-[13px] text-[#8F95A3]">不一致があれば、結果をそのまま修正コメントにできます</span>
+              <button
+                type="button"
+                disabled={tabStatus(aiTab) !== 'fail'}
+                onClick={() => { const c = aiCommentDraft(); if (c) void addAiComment(c.time, c.text) }}
+                className={`${ghostBtn} shrink-0 inline-flex items-center gap-1.5`}
+              >
+                {addedAi ? <><Check className="w-4 h-4 text-[#5BE3A0]" aria-hidden />追加しました</> : <><Plus className="w-4 h-4" aria-hidden />コメントに追加</>}
+              </button>
             </div>
-            </div>
-          )}
-        </div>
-      </div>
-
+          </section>
+        )}
       {/* リサイズハンドル */}
       <div
-        className="hidden lg:flex items-center justify-center w-1.5 bg-zinc-800 hover:bg-violet-600 cursor-col-resize shrink-0 transition-colors"
+        className={`hidden ${canAIFeatures ? '' : 'lg:flex'} items-center justify-center w-1.5 bg-[#2A2E37] hover:bg-[#6F4CFF] cursor-col-resize shrink-0 transition-colors`}
         onMouseDown={e => {
           e.preventDefault()
           isDraggingH.current = true
@@ -1017,76 +1077,65 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
         }}
       />
 
-      {/* コメント一覧 */}
-      <div className="w-full flex flex-col border-l border-zinc-800 bg-zinc-900 shrink-0" style={{ width: panelWidth }}>
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800">
-          <MessageSquarePlus className="w-4 h-4 text-zinc-400" />
-          <span className="text-sm font-medium text-zinc-300">修正コメント ({comments.filter(c => !parseComment(c.content).replyTo).length})</span>
-          <button
-            onClick={handleCopyAllComments}
-            disabled={comments.length === 0}
-            className="ml-auto flex items-center gap-1.5 px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors disabled:opacity-30"
-            title="全コメントをコピー"
-          >
-            {copiedAll ? <Check className="w-3.5 h-3.5 text-green-400" /> : <ClipboardList className="w-3.5 h-3.5" />}
-            {copiedAll ? 'コピー済み' : '全コピー'}
-          </button>
+      {/* 3: コメント */}
+      <aside
+        className={`w-full min-h-0 flex flex-col bg-[#16181D] ${canAIFeatures ? 'lg:flex-1 lg:min-w-[320px]' : 'lg:w-[var(--pw)] lg:flex-none'}`}
+        style={{ '--pw': `${panelWidth}px` } as React.CSSProperties}
+      >
+        <div className="h-[52px] shrink-0 px-4 flex items-center gap-2 border-b border-[#2A2E37]">
+          <h2 className="text-base font-bold">修正コメント</h2>
+          <span className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-[#6F4CFF] text-white text-xs inline-flex items-center justify-center">{topComments.length}</span>
         </div>
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
-          {comments.filter(c => !parseComment(c.content).replyTo).length === 0 ? (
-            <p className="text-zinc-500 text-sm text-center mt-8">コメントはまだありません</p>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-3">
+          {topComments.length === 0 ? (
+            <p className="text-[#8F95A3] text-sm text-center mt-8">コメントはまだありません</p>
           ) : (
-            comments
-              .filter(c => !parseComment(c.content).replyTo)
+            [...topComments]
               .sort((a, b) => a.time_sec - b.time_sec)
               .map(c => {
                 const { text, region } = parseComment(c.content)
+                const selected = hoveredCommentId === c.id
                 const replies = comments
                   .filter(r => parseComment(r.content).replyTo === c.id)
                   .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+                const actBtn = 'p-1.5 rounded-md hover:bg-[#2A2E37] text-[#B4B9C4] hover:text-white ' + FOCUS
                 return (
                   <div key={c.id}>
-                    {/* 親コメント */}
                     <div
                       onClick={() => { if (editingId !== c.id) handleSeek(c.time_sec) }}
                       onDoubleClick={e => handleEditStart(e, c)}
                       onMouseEnter={() => setHoveredCommentId(c.id)}
                       onMouseLeave={() => setHoveredCommentId(null)}
-                      className={`relative w-full text-left pl-3 pr-3 py-3 rounded-lg border-l-4 border-l-red-500 transition-colors group cursor-pointer bg-zinc-800 hover:bg-zinc-700/80 ${editingId === c.id ? 'ring-1 ring-red-500' : ''}`}
+                      className={`group p-3.5 rounded-xl flex flex-col gap-2.5 transition-colors cursor-pointer ${
+                        selected || editingId === c.id
+                          ? 'bg-[#FFB020]/[.08] border-[1.5px] border-[#FFB020]'
+                          : 'bg-[#1D2027] border border-[#2A2E37] hover:border-[#3A3F4B]'
+                      }`}
                     >
-                      <div className="flex items-center justify-between gap-1.5 mb-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full shrink-0 bg-red-500" />
-                          <span className="text-xs font-mono text-violet-400 group-hover:text-violet-300">
-                            {formatTime(c.time_sec)}
-                          </span>
-                          {region && <span className="text-xs text-zinc-600" title="範囲指定あり">▣</span>}
-                          {authorName(c.author_email) && (
-                            <span className="text-xs text-zinc-500 bg-zinc-700 px-1.5 py-0.5 rounded">
-                              {authorName(c.author_email)}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-2">
+                        {(
                           <button
-                            onClick={e => { e.stopPropagation(); setReplyingToId(replyingToId === c.id ? null : c.id); setReplyText('') }}
-                            className="p-1 rounded hover:bg-zinc-600" title="返信"
-                          >
-                            <Reply className="w-3 h-3 text-zinc-500" />
+                            type="button"
+                            onClick={e => { e.stopPropagation(); handleSeek(c.time_sec) }}
+                            className={`font-mono text-[13px] font-medium rounded-md px-2 py-0.5 cursor-pointer ${FOCUS} ${selected ? 'bg-[#FFB020] text-[#1A1200]' : 'bg-[#FFB020]/15 text-[#FFB020]'}`}
+                          >{formatTime(c.time_sec)}</button>
+                        )}
+                        {region && <span className="text-xs text-[#FFB020]" title="範囲指定あり"><ScanLine className="w-3.5 h-3.5" aria-label="範囲指定あり" /></span>}
+                        {authorName(c.author_email) && <span className="text-[13px] text-[#B4B9C4]">{authorName(c.author_email)}</span>}
+                        <span className="ml-auto text-xs text-[#8F95A3] group-hover:hidden group-focus-within:hidden">{formatDate(c.created_at)}</span>
+                        <div className="ml-auto hidden group-hover:flex group-focus-within:flex items-center gap-0.5">
+                          <button type="button" onClick={e => { e.stopPropagation(); setReplyingToId(replyingToId === c.id ? null : c.id); setReplyText('') }} className={actBtn} title="返信" aria-label="返信"><Reply className="w-3.5 h-3.5" aria-hidden /></button>
+                          <button type="button" onClick={e => handleCopyComment(e, c)} className={actBtn} title="コピー" aria-label="コピー">
+                            {copiedCommentId === c.id ? <Check className="w-3.5 h-3.5 text-[#5BE3A0]" aria-hidden /> : <Copy className="w-3.5 h-3.5" aria-hidden />}
                           </button>
-                          <button onClick={e => handleCopyComment(e, c)} className="p-1 rounded hover:bg-zinc-600" title="コピー">
-                            {copiedCommentId === c.id ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3 text-zinc-500" />}
-                          </button>
-                          <button onClick={e => handleEditStart(e, c)} className="p-1 rounded hover:bg-zinc-600" title="編集">
-                            <Pencil className="w-3 h-3 text-zinc-500" />
-                          </button>
-                          <button onClick={e => handleDelete(e, c.id)} className="p-1 rounded hover:bg-red-900" title="削除">
-                            <Trash2 className="w-3 h-3 text-zinc-500" />
-                          </button>
+                          <button type="button" onClick={e => handleEditStart(e, c)} className={actBtn} title="編集" aria-label="編集"><Pencil className="w-3.5 h-3.5" aria-hidden /></button>
+                          <button type="button" onClick={e => handleDelete(e, c.id)} className={actBtn + ' hover:!text-[#FF9A9A]'} title="削除" aria-label="削除"><Trash2 className="w-3.5 h-3.5" aria-hidden /></button>
                         </div>
                       </div>
+
                       {editingId === c.id ? (
-                        <div onClick={e => e.stopPropagation()} className="flex flex-col gap-1.5">
+                        <div onClick={e => e.stopPropagation()} className="flex flex-col gap-2">
                           <textarea
                             autoFocus rows={2} value={editContent}
                             onChange={e => setEditContent(e.target.value)}
@@ -1096,19 +1145,21 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                               if (e.key === 'Enter' && !e.shiftKey && !isComposing) { e.preventDefault(); handleEditSubmit(c) }
                               if (e.key === 'Escape') setEditingId(null)
                             }}
-                            className="w-full bg-zinc-700 border border-red-600 rounded px-2 py-1 text-sm text-white focus:outline-none resize-none"
+                            aria-label="コメントを編集"
+                            className={`w-full rounded-lg bg-[#0E0F13] border border-[#2A2E37] px-3 py-2 text-sm resize-none ${FOCUS}`}
                           />
-                          <div className="flex gap-1.5 justify-end">
-                            <button onClick={() => setEditingId(null)} className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-0.5">キャンセル</button>
-                            <button onClick={() => handleEditSubmit(c)} disabled={!editContent.trim()} className="text-xs px-2 py-0.5 bg-red-600 hover:bg-red-500 rounded text-white disabled:opacity-40">保存</button>
+                          <div className="flex gap-2 justify-end">
+                            <button type="button" onClick={() => setEditingId(null)} className={`text-[13px] text-[#B4B9C4] hover:text-white px-2 py-1 rounded ${FOCUS}`}>キャンセル</button>
+                            <button type="button" onClick={() => handleEditSubmit(c)} disabled={!editContent.trim()} className={`text-[13px] px-3 py-1 rounded-md bg-[#6F4CFF] text-white font-bold disabled:opacity-40 ${FOCUS}`}>保存</button>
                           </div>
                         </div>
                       ) : (
-                        <p className="text-sm text-zinc-200 leading-snug whitespace-pre-wrap">{text}</p>
+                        <p className="text-sm whitespace-pre-wrap leading-relaxed">{text}</p>
                       )}
+
+                      {selected && region && <div className="text-xs text-[#FFB020]">選択中：動画上に範囲を表示しています</div>}
                     </div>
 
-                    {/* 返信コメント */}
                     {replies.map(r => {
                       const { text: rText } = parseComment(r.content)
                       return (
@@ -1116,32 +1167,22 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                           key={r.id}
                           onClick={() => { if (editingId !== r.id) handleSeek(r.time_sec) }}
                           onDoubleClick={e => handleEditStart(e, r)}
-                          className={`ml-4 mt-1 relative w-full text-left pl-3 pr-3 py-2 rounded-lg border-l-4 border-l-zinc-600 transition-colors group cursor-pointer bg-zinc-800/70 hover:bg-zinc-700/60 ${editingId === r.id ? 'ring-1 ring-zinc-500' : ''}`}
+                          className="group ml-5 mt-1.5 p-3 rounded-xl bg-[#1D2027]/70 border border-[#2A2E37]"
                         >
-                          <div className="flex items-center justify-between gap-1.5 mb-1">
-                            <div className="flex items-center gap-1.5">
-                              <Reply className="w-3 h-3 text-zinc-600" />
-                              <span className="text-xs font-mono text-zinc-500">{formatTime(r.time_sec)}</span>
-                              {authorName(r.author_email) && (
-                                <span className="text-xs text-zinc-600 bg-zinc-700/60 px-1.5 py-0.5 rounded">
-                                  {authorName(r.author_email)}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button onClick={e => handleCopyComment(e, r)} className="p-1 rounded hover:bg-zinc-600" title="コピー">
-                                {copiedCommentId === r.id ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3 text-zinc-500" />}
+                          <div className="flex items-center gap-2 mb-1">
+                            <Reply className="w-3.5 h-3.5 text-[#8F95A3]" aria-hidden />
+                            {authorName(r.author_email) && <span className="text-[13px] text-[#B4B9C4]">{authorName(r.author_email)}</span>}
+                            <span className="ml-auto text-xs text-[#8F95A3] group-hover:hidden group-focus-within:hidden">{formatDate(r.created_at)}</span>
+                            <div className="ml-auto hidden group-hover:flex group-focus-within:flex items-center gap-0.5">
+                              <button type="button" onClick={e => handleCopyComment(e, r)} className={actBtn} title="コピー" aria-label="コピー">
+                                {copiedCommentId === r.id ? <Check className="w-3.5 h-3.5 text-[#5BE3A0]" aria-hidden /> : <Copy className="w-3.5 h-3.5" aria-hidden />}
                               </button>
-                              <button onClick={e => handleEditStart(e, r)} className="p-1 rounded hover:bg-zinc-600" title="編集">
-                                <Pencil className="w-3 h-3 text-zinc-500" />
-                              </button>
-                              <button onClick={e => handleDelete(e, r.id)} className="p-1 rounded hover:bg-red-900" title="削除">
-                                <Trash2 className="w-3 h-3 text-zinc-500" />
-                              </button>
+                              <button type="button" onClick={e => handleEditStart(e, r)} className={actBtn} title="編集" aria-label="編集"><Pencil className="w-3.5 h-3.5" aria-hidden /></button>
+                              <button type="button" onClick={e => handleDelete(e, r.id)} className={actBtn + ' hover:!text-[#FF9A9A]'} title="削除" aria-label="削除"><Trash2 className="w-3.5 h-3.5" aria-hidden /></button>
                             </div>
                           </div>
                           {editingId === r.id ? (
-                            <div onClick={e => e.stopPropagation()} className="flex flex-col gap-1.5">
+                            <div onClick={e => e.stopPropagation()} className="flex flex-col gap-2">
                               <textarea
                                 autoFocus rows={2} value={editContent}
                                 onChange={e => setEditContent(e.target.value)}
@@ -1151,23 +1192,23 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                                   if (e.key === 'Enter' && !e.shiftKey && !isComposing) { e.preventDefault(); handleEditSubmit(r) }
                                   if (e.key === 'Escape') setEditingId(null)
                                 }}
-                                className="w-full bg-zinc-700 border border-zinc-500 rounded px-2 py-1 text-sm text-white focus:outline-none resize-none"
+                                aria-label="返信を編集"
+                                className={`w-full rounded-lg bg-[#0E0F13] border border-[#2A2E37] px-3 py-2 text-sm resize-none ${FOCUS}`}
                               />
-                              <div className="flex gap-1.5 justify-end">
-                                <button onClick={() => setEditingId(null)} className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-0.5">キャンセル</button>
-                                <button onClick={() => handleEditSubmit(r)} disabled={!editContent.trim()} className="text-xs px-2 py-0.5 bg-zinc-600 hover:bg-zinc-500 rounded text-white disabled:opacity-40">保存</button>
+                              <div className="flex gap-2 justify-end">
+                                <button type="button" onClick={() => setEditingId(null)} className={`text-[13px] text-[#B4B9C4] hover:text-white px-2 py-1 rounded ${FOCUS}`}>キャンセル</button>
+                                <button type="button" onClick={() => handleEditSubmit(r)} disabled={!editContent.trim()} className={`text-[13px] px-3 py-1 rounded-md bg-[#6F4CFF] text-white font-bold disabled:opacity-40 ${FOCUS}`}>保存</button>
                               </div>
                             </div>
                           ) : (
-                            <p className="text-sm text-zinc-300 leading-snug whitespace-pre-wrap">{rText}</p>
+                            <p className="text-sm whitespace-pre-wrap leading-relaxed">{rText}</p>
                           )}
                         </div>
                       )
                     })}
 
-                    {/* 返信入力フォーム */}
                     {replyingToId === c.id && (
-                      <div className="ml-4 mt-1 flex flex-col gap-1.5 p-2 bg-zinc-800/50 rounded-lg border border-zinc-700">
+                      <div className="ml-5 mt-1.5 flex flex-col gap-2 p-3 rounded-xl bg-[#1D2027]/50 border border-[#2A2E37]">
                         <textarea
                           autoFocus rows={2} value={replyText}
                           onChange={e => setReplyText(e.target.value)}
@@ -1178,15 +1219,12 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                             if (e.key === 'Escape') setReplyingToId(null)
                           }}
                           placeholder="返信内容を入力..."
-                          className="w-full bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-400 resize-none"
+                          aria-label="返信内容"
+                          className={`w-full rounded-lg bg-[#0E0F13] border border-[#2A2E37] px-3 py-2 text-sm placeholder:text-[#8F95A3] resize-none ${FOCUS}`}
                         />
-                        <div className="flex gap-1.5 justify-end">
-                          <button onClick={() => setReplyingToId(null)} className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-0.5">キャンセル</button>
-                          <button
-                            onClick={() => handleReplySubmit(c.id)}
-                            disabled={!replyText.trim()}
-                            className="text-xs px-2 py-0.5 bg-zinc-600 hover:bg-zinc-500 rounded text-white disabled:opacity-40"
-                          >返信</button>
+                        <div className="flex gap-2 justify-end">
+                          <button type="button" onClick={() => setReplyingToId(null)} className={`text-[13px] text-[#B4B9C4] hover:text-white px-2 py-1 rounded ${FOCUS}`}>キャンセル</button>
+                          <button type="button" onClick={() => handleReplySubmit(c.id)} disabled={!replyText.trim()} className={`text-[13px] px-3 py-1 rounded-md bg-[#6F4CFF] text-white font-bold disabled:opacity-40 ${FOCUS}`}>返信</button>
                         </div>
                       </div>
                     )}
@@ -1195,6 +1233,17 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
               })
           )}
         </div>
+
+        <div className="shrink-0 p-4 border-t border-[#2A2E37]">
+          <button
+            type="button" onClick={handleCopyAllComments} disabled={comments.length === 0}
+            className={`w-full h-11 rounded-[10px] border border-[#2A2E37] bg-[#1D2027] text-sm font-medium inline-flex items-center justify-center gap-2 hover:bg-[#262A33] disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS}`}
+          >
+            {copiedAll ? <Check className="w-4 h-4 text-[#5BE3A0]" aria-hidden /> : <ClipboardList className="w-4 h-4" aria-hidden />}
+            {copiedAll ? 'コピーしました' : '修正指示をまとめてコピー'}
+          </button>
+        </div>
+      </aside>
       </div>
     </div>
   )
