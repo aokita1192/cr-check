@@ -541,9 +541,25 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
     setRate(next)
     if (nativeVideoRef.current) nativeVideoRef.current.playbackRate = next
   }
+  // シーク: ドラッグ中は前のシークが終わるまで待ち、最新位置だけを反映する
+  // （連続してシークを投げ直すと、完了せず映像が止まって見えるため）
+  const scrubbing = useRef(false)
+  const pendingSeek = useRef<number | null>(null)
   const seekTo = (sec: number) => {
-    if (nativeVideoRef.current) nativeVideoRef.current.currentTime = sec
     setCurTime(sec)
+    const v = nativeVideoRef.current
+    if (!v) return
+    if (v.seeking) pendingSeek.current = sec
+    else v.currentTime = sec
+  }
+  const handleSeeked = (v: HTMLVideoElement) => {
+    if (pendingSeek.current !== null) {
+      const t = pendingSeek.current
+      pendingSeek.current = null
+      v.currentTime = t
+    } else {
+      setCurTime(v.currentTime)
+    }
   }
   const toggleAnnotate = () => {
     setAnnotateMode(v => !v)
@@ -693,7 +709,8 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                 ref={nativeVideoRef} src={videoUrl} playsInline
                 className="w-full h-full" style={{ maxHeight: '100%' }}
                 onClick={togglePlay}
-                onTimeUpdate={e => setCurTime(e.currentTarget.currentTime)}
+                onTimeUpdate={e => { if (!scrubbing.current) setCurTime(e.currentTarget.currentTime) }}
+                onSeeked={e => handleSeeked(e.currentTarget)}
                 onLoadedMetadata={e => setDuration(e.currentTarget.duration || 0)}
                 onDurationChange={e => setDuration(e.currentTarget.duration || 0)}
                 onPlay={() => setPlaying(true)}
@@ -860,6 +877,10 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
                     type="range" aria-label="再生位置"
                     min={0} max={duration || 0} step={0.01} value={Math.min(curTime, duration || 0)}
                     onChange={e => seekTo(Number(e.target.value))}
+                    onPointerDown={() => { scrubbing.current = true }}
+                    onPointerUp={() => { scrubbing.current = false }}
+                    onPointerCancel={() => { scrubbing.current = false }}
+                    onBlur={() => { scrubbing.current = false }}
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   />
                 </div>
