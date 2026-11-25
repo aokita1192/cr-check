@@ -13,8 +13,18 @@ import type { EvidenceCheckResult } from '@/app/api/check-evidence/route'
 import type { AnnotationCheckResult } from '@/types/annotation'
 import UserMenu from '@/components/UserMenu'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ReactPlayer = dynamic(() => import('react-player'), { ssr: false }) as any
+// react-player v3: src プロップ + ref（HTMLVideoElement 互換）。
+// next/dynamic は ref を転送しないため、playerRef として渡すラッパーを挟む
+type PlayerHandle = { currentTime: number }
+type PlayerProps = { src: string; width?: string; height?: string; controls?: boolean; playerRef?: React.Ref<PlayerHandle> }
+const ReactPlayer = dynamic<PlayerProps>(
+  () => import('react-player').then(m => {
+    const RP = m.default as unknown as React.ComponentType<Record<string, unknown>>
+    const Wrapped = ({ playerRef, ...rest }: PlayerProps) => <RP ref={playerRef} {...rest} />
+    return Wrapped
+  }),
+  { ssr: false },
+)
 
 type Props = { projectId: string; videoUrl: string }
 type PlayerMode = 'native' | 'react-player' | 'drive-file' | 'drive-folder'
@@ -153,8 +163,7 @@ function captureVideoFrame(video: HTMLVideoElement): string | null {
 export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
   const mode = getPlayerMode(videoUrl)
   const nativeVideoRef = useRef<HTMLVideoElement>(null)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const reactPlayerInstance = useRef<any>(null)
+  const reactPlayerInstance = useRef<PlayerHandle | null>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
 
   const [comments, setComments] = useState<Comment[]>([])
@@ -332,7 +341,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
 
   // react-player コメント送信
   const handleStampCurrentTime = () => {
-    const time = reactPlayerInstance.current?.getCurrentTime() ?? 0
+    const time = reactPlayerInstance.current?.currentTime ?? 0
     setStampedTime(Math.floor(time * 10) / 10)
   }
 
@@ -356,7 +365,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
 
   const handleSeek = (sec: number) => {
     if (mode === 'native' && nativeVideoRef.current) nativeVideoRef.current.currentTime = sec
-    else reactPlayerInstance.current?.seekTo(sec, 'seconds')
+    else if (reactPlayerInstance.current) reactPlayerInstance.current.currentTime = sec
   }
 
   const handleCopyComment = (e: React.MouseEvent, c: Comment) => {
@@ -837,10 +846,7 @@ export default function VideoReviewPanel({ projectId, videoUrl }: Props) {
 
           {mode === 'react-player' && (
             <div className="w-full h-full">
-              <ReactPlayer
-                url={videoUrl} width="100%" height="100%" controls
-                onReady={(p: unknown) => { reactPlayerInstance.current = p }}
-              />
+              <ReactPlayer src={videoUrl} width="100%" height="100%" controls playerRef={reactPlayerInstance} />
             </div>
           )}
           {mode === 'drive-file' && (
