@@ -5,7 +5,9 @@ import re
 import uuid
 
 import anthropic
+import feedback_logic as fbl
 import pandas as pd
+import result_parser as rp
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -181,7 +183,7 @@ SERVICES: dict[str, dict] = {
 MANUAL_PDF_URL = "https://drive.google.com/file/d/1R9mIsqn_sYPr04PDKJLqt_YesXzd8NVx/view?usp=drive_link"
 ADMIN_EMAIL = "aokita@mota.inc"
 MODEL_NAME = "claude-sonnet-5"
-PROMPT_VERSION = "v5"  # 上げると全ユーザーのセッションキャッシュをリセット
+PROMPT_VERSION = "v6"  # 上げると全ユーザーのセッションキャッシュをリセット
 USD_JPY = 150
 APP_VERSION = "v2.0"  # increment when logging schema changes
 
@@ -191,9 +193,6 @@ OUTPUT_PRICE_PER_1M_USD         = 10.00
 CACHE_WRITE_5M_PRICE_PER_1M_USD = 2.50   # ephemeral 5-minute cache write
 CACHE_WRITE_1H_PRICE_PER_1M_USD = 4.00   # ephemeral 1-hour cache write
 CACHE_READ_PRICE_PER_1M_USD     = 0.20
-
-# Keep old name as alias for dashboard display
-CACHE_WRITE_PRICE_PER_1M_USD = CACHE_WRITE_5M_PRICE_PER_1M_USD
 
 
 def _detect_env() -> str:
@@ -326,7 +325,10 @@ _OUTPUT_SECTION = """\
 指摘がある場合：下記の形式で、台本に登場する順に1行ずつ並べます。
 
 形式1（レギュレーション違反・誤字脱字の指摘）
-「（審査対象のセリフから一字一句引用） → （代替案1）または（代替案2）（理由を30文字以内で）」
+「（審査対象のセリフから一字一句引用） → 案1：（代替案1）案2：（代替案2）（理由を30文字以内で）【参照：（根拠にした審査基準の項目名）】」
+・「案1：」「案2：」の見出しは必ず付けます。代替案の中に「または」を使っても構いません。
+・理由は全角の丸括弧（　）で囲みます。
+・【参照：…】は、根拠にした審査基準の項目名を審査基準の表記のまま書きます。誤字脱字の指摘など、該当する項目がない場合は【参照：…】ごと省略します。
 
 形式2（<判定補足> の「台本テキストだけでは判定できない事項」に該当しうる記述があった場合）
 ▼要確認：（原文引用）（確認が必要な内容を簡潔に記載）
@@ -343,12 +345,12 @@ _OUTPUT_SECTION = """\
 </出力仕様>
 
 <出力例1：レギュレーション違反の指摘がある場合>
-「一番安く引越しできる方法を紹介します → 比較した中で1番安い見積もりがわかる方法を紹介しますまたはお得に引越しする見積もりの方法を紹介します（比較範囲を限定しない最上級表現）」
-「電話ラッシュなし → 数十社からの電話ラッシュなしまたは電話ラッシュなし※厳選3社からお電話またはメールはあります。（電話がない旨を限定なく表現している）」
+「一番安く引越しできる方法を紹介します → 案1：比較した中で1番安い見積もりがわかる方法を紹介します案2：お得に引越しする見積もりの方法を紹介します（比較範囲を限定しない最上級表現）【参照：最上級表現の根拠明記】」
+「電話ラッシュなし → 案1：数十社からの電話ラッシュなし案2：電話ラッシュなし※厳選3社からお電話またはメールはあります。（電話がない旨を限定なく表現している）」
 </出力例1>
 
 <出力例2：誤字脱字の指摘>
-「はれし → ハレシーまたはHALESEE（誤字・脱字）」
+「はれし → 案1：ハレシー案2：HALESEE（誤字・脱字）」
 </出力例2>
 
 <出力例3：指摘がない場合>
@@ -521,9 +523,17 @@ if FEEDBACK_ENABLED:
         try:
             return _get_spreadsheet().worksheet(tab)
         except gspread.exceptions.WorksheetNotFound:
-            ws = _get_spreadsheet().add_worksheet(title=tab, rows=2000, cols=7)
-            ws.append_row(["timestamp", "user_email", "service", "serif", "chusyaku", "ai_result", "feedback"])
+            ws = _get_spreadsheet().add_worksheet(title=tab, rows=2000, cols=len(fbl.FEEDBACK_HEADERS))
+            ws.append_row(fbl.FEEDBACK_HEADERS)
             return ws
+
+    def _ensure_feedback_headers(ws) -> None:
+        """既存シート（旧7列）に新しい列の見出しを足す。先頭7列が想定と違う場合は触らない。"""
+        header = ws.row_values(1)
+        if header[:7] == fbl.FEEDBACK_HEADERS[:7] and len(header) < len(fbl.FEEDBACK_HEADERS):
+            if ws.col_count < len(fbl.FEEDBACK_HEADERS):
+                ws.add_cols(len(fbl.FEEDBACK_HEADERS) - ws.col_count)
+            ws.update(range_name="A1", values=[fbl.FEEDBACK_HEADERS])
 
     _USAGE_HEADERS = [
         "timestamp_utc", "run_id", "user_email", "service", "row_count", "api_calls",
@@ -569,32 +579,34 @@ if FEEDBACK_ENABLED:
 
 
 @st.cache_data(ttl=300)
-def load_user_feedback(service_key: str, user_email: str) -> list[dict]:
+def load_feedback(service_key: str) -> list[dict]:
+    """全担当者共通のフィードバック（取り消し・上書き済みの行は除外）。"""
     if not FEEDBACK_ENABLED:
         return []
     try:
         ws = _feedback_ws(service_key)
-        return [r for r in ws.get_all_records() if r.get("user_email") == user_email and r.get("feedback")]
+        return fbl.effective_records(ws.get_all_records())
     except Exception:
         return []
 
 
-def save_feedback_rows(service_key: str, user_email: str, rows: list[dict]) -> int:
+def save_feedback_rows(service_key: str, user_email: str, run_id: str, rows: list[dict]) -> bool:
+    """rows は feedback_logic.plan_save の出力。1回のAPI呼び出しで一括追記する。成功で True。"""
     if not FEEDBACK_ENABLED:
-        return 0
+        return False
+    if not rows:
+        return True
     try:
         ws = _feedback_ws(service_key)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        saved = 0
-        for row in rows:
-            fb = str(row.get("feedback", "")).strip()
-            if fb:
-                ws.append_row([ts, user_email, service_key, row.get("serif", ""), row.get("chusyaku", ""), row.get("ai_result", ""), fb])
-                saved += 1
-        return saved
+        _ensure_feedback_headers(ws)
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        values = [[ts, user_email, service_key, r["serif"], r["chusyaku"], r["ai_result"], r["feedback"],
+                   run_id, r["item_no"], r["verdict"], r["reason_code"], r["memo"]] for r in rows]
+        ws.append_rows(values, value_input_option="RAW")
+        return True
     except Exception as e:
         st.error(f"フィードバック保存エラー: {e}")
-        return 0
+        return False
 
 
 def log_usage(
@@ -678,13 +690,9 @@ def load_usage_log() -> pd.DataFrame:
             if col not in df.columns:
                 df[col] = 0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-        if "cost_usd" in df.columns:
-            df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
-        # Mark rows written by old logging logic (missing new columns)
-        if "total_input_tokens" in df.columns:
-            df["is_legacy"] = df["total_input_tokens"] == 0
-        else:
-            df["is_legacy"] = True
+        if "cost_usd" not in df.columns:
+            df["cost_usd"] = 0.0
+        df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
         return df
     except Exception:
         return pd.DataFrame()
@@ -1045,7 +1053,7 @@ def build_feedback_block(feedback_list: list[dict]) -> str:
         )
     return (
         "<担当者フィードバック参考事例>\n"
-        + "以下は、この担当者が過去に指摘・修正したフィードバック事例です。今回の審査にも同様の判断基準を適用してください。\n\n"
+        + "以下は、担当者が過去に指摘・修正したフィードバック事例です。今回の審査にも同様の判断基準を適用してください。\n\n"
         + "\n\n".join(parts)
         + "\n</担当者フィードバック参考事例>"
     )
@@ -1117,9 +1125,364 @@ def _esc_attr(text: str) -> str:
             .replace("\r", ""))
 
 
+# ─── 台本チェック結果画面 ─────────────────────────────────────────────────────
+_REASON_BY_LABEL = {label: code for code, label in fbl.REASONS}
+_AGREE_LABEL, _DISAGREE_LABEL = "判定に同意", "同意しない"
+_OK_PREVIEW = 5
+
+
+def _stepper_html(saved: bool) -> str:
+    def dot(n: int, state: str) -> str:
+        if state == "done":
+            inner, bg, bd, fg = "✓", "#5B3FE0", "#5B3FE0", "#fff"
+        elif state == "current":
+            inner, bg, bd, fg = str(n), "#fff", "#5B3FE0", "#5B3FE0"
+        else:
+            inner, bg, bd, fg = str(n), "#fff", "#D0D5DD", "#626B7F"
+        return (f"<span style='width:28px;height:28px;box-sizing:border-box;border-radius:50%;background:{bg};border:2px solid {bd};"
+                f"color:{fg};font-size:14px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;'>{inner}</span>")
+    steps = [("入力", "done"), ("AIチェック", "done"),
+             ("結果確認", "done" if saved else "current"), ("フィードバック", "done" if saved else "todo")]
+    parts = []
+    for i, (name, state) in enumerate(steps):
+        weight = "700" if state == "current" else "400"
+        parts.append(f"<span style='display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:{weight};color:#454F63;'>"
+                     f"{dot(i + 1, state)}{name}</span>")
+        if i < len(steps) - 1:
+            line = "#5B3FE0" if steps[i + 1][1] != "todo" else "#D0D5DD"
+            parts.append(f"<span style='flex:1;height:2px;background:{line};'></span>")
+    return "<div style='display:flex;align-items:center;gap:10px;margin:.5rem 0 1rem;'>" + "".join(parts) + "</div>"
+
+
+def _fb_sync(run_id: str, statuses: dict[int, str]) -> None:
+    """ウィジェットの値を別領域に退避・復元する。Streamlitは描画されなかったウィジェットの値を捨てるため、
+    サービス切替などで結果が一時的に非表示になっても、入力中のフィードバックが消えないようにする。"""
+    ss = st.session_state
+    store = ss.setdefault("fb_store", {})
+    for no in statuses:
+        for suffix in ("_v", "_r", "_m", "_x"):
+            key = f"fb_{run_id}_{no}{suffix}"
+            if key in ss:
+                store[key] = ss[key]
+            elif key in store:
+                ss[key] = store[key]
+
+
+def _md_esc(text: str) -> str:
+    """HTMLエスケープに加え、Markdown/KaTeXとして解釈される記号を数値参照にする。"""
+    t = _esc(text)
+    for ch, ref in (("$", "&#36;"), ("~", "&#126;"), ("*", "&#42;"), ("`", "&#96;"), ("_", "&#95;")):
+        t = t.replace(ch, ref)
+    return t
+
+
+def _fb_collect(run_id: str, statuses: dict[int, str]) -> dict[int, dict]:
+    _fb_sync(run_id, statuses)
+    ss = st.session_state
+    fb: dict[int, dict] = {}
+    for no, s in statuses.items():
+        k = f"fb_{run_id}_{no}"
+        if s == "ng":
+            v = {_AGREE_LABEL: "agree", _DISAGREE_LABEL: "disagree"}.get(ss.get(k + "_v"))
+            fb[no] = {"v": v, "reason": _REASON_BY_LABEL.get(ss.get(k + "_r") or "", ""), "memo": ss.get(k + "_m") or ""}
+        else:
+            fb[no] = {"v": "disagree" if ss.get(k + "_x") else None, "memo": ss.get(k + "_m") or ""}
+    return fb
+
+
+def _assessment_cards_html(recs: list[dict[str, str]]) -> str:
+    cards = ""
+    for rec in recs:
+        num, detail = rec.get("number", ""), rec.get("detail", "")
+        cards += ("<div style='background:#F8FAFF;border:1px solid #DBEAFE;border-radius:6px;padding:6px 8px;margin-bottom:5px;font-size:.82em;'>"
+                  + (f"<div style='font-weight:700;color:#1D4ED8;'>{_esc(num)}</div>" if num else "")
+                  + (f"<div style='color:#374151;'>{_esc(detail)}</div>" if detail else "") + "</div>")
+    return cards
+
+
+def _badge(text: str, fg: str, bg: str, border: str = "transparent") -> str:
+    return (f"<span style='display:inline-flex;align-items:center;height:26px;padding:0 12px;border-radius:13px;background:{bg};"
+            f"border:1px solid {border};color:{fg};font-size:13px;font-weight:700;'>{text}</span>")
+
+
+def render_script_results(selected_service: str, user_email: str) -> None:
+    res = st.session_state.audit_results
+    run_id = res.get("run_id") or "norun"
+    serifs, notes, results = res["serif_list"], res["chusyaku_list"], res["result_list"]
+    arecs_all = res.get("assessment_records_list") or [[] for _ in serifs]
+    total = len(serifs)
+    parsed = [rp.parse_result(r) for r in results]
+    status_of = {i + 1: parsed[i][0] for i in range(total)}
+    ng_nos = [n for n, s in status_of.items() if s == rp.NG]
+    ok_nos = [n for n, s in status_of.items() if s == rp.OK]
+    confirm_nos = [n for n, s in status_of.items() if s == rp.CONFIRM]
+    err_nos = [n for n, s in status_of.items() if s == rp.ERROR]
+    fb_statuses = {**{n: "ng" for n in ng_nos}, **{n: "ok" for n in ok_nos}}
+    items = [{"no": n, "status": fb_statuses[n], "serif": serifs[n - 1], "chusyaku": notes[n - 1], "ai_result": results[n - 1]}
+             for n in sorted(fb_statuses)]
+
+    fb = _fb_collect(run_id, fb_statuses) if FEEDBACK_ENABLED else {}
+    S = fbl.summarize(fb_statuses, fb)
+    entry = st.session_state.setdefault("fb_saved", {}).get(run_id)
+    pending_rows, _ = fbl.plan_save(entry["prev"] if entry else {}, items, fb)
+    is_saved = bool(entry) and not pending_rows
+    is_dirty = bool(pending_rows) and S["error_count"] == 0
+    only_agree = S["input_count"] > 0 and not entry and not pending_rows
+
+    st.divider()
+    head_l, head_r = st.columns([4, 1])
+    with head_l:
+        st.markdown(f"<div style='font-size:1.6rem;font-weight:700;'>判定結果</div>"
+                    f"<div style='color:#454F63;'>判定の基準：{selected_service.split(' ', 1)[-1]} ・ セリフ {total}件</div>",
+                    unsafe_allow_html=True)
+    with head_r:
+        reg_url = SERVICES[selected_service].get("reg_url", "")
+        if reg_url:
+            st.link_button("レギュレーションを確認 ↗", reg_url, use_container_width=True)
+    st.markdown(_stepper_html(is_saved), unsafe_allow_html=True)
+
+    if is_saved:
+        st.success(f"フィードバックを保存しました（{entry['at']} UTC）。次回以降のAI審査に、全担当者共通で反映されます。内容を変更すると再保存が必要になります。")
+
+    # ── サマリー ──
+    n_ng = len(ng_nos)
+    color = "#B42318" if n_ng else "#0E6F4F"
+    title = f"要修正 {n_ng}件" if n_ng else "要修正なし"
+    override = ""
+    if S["has_override"]:
+        notes_txt = []
+        if S["excluded"]:
+            notes_txt.append(f"{S['excluded']}件を誤検知として除外")
+        if S["missed"]:
+            notes_txt.append(f"見逃し{S['missed']}件を追加")
+        override = (f"<div style='font-size:16px;font-weight:700;color:{'#B42318' if S['final_count'] else '#0E6F4F'};'>"
+                    f"担当者の判断：要修正 {S['final_count']}件<span style='font-size:14px;font-weight:500;color:#454F63;'>　{'・'.join(notes_txt)}</span></div>")
+    elif n_ng:
+        override = "<div style='color:#454F63;'>提出前に、下のセリフを修正してください。</div>"
+    stat = lambda label, val, unit, c="#1B2230": (f"<div><div style='font-size:13px;color:#626B7F;'>{label}</div>"
+                                                  f"<div style='font-size:26px;font-weight:700;color:{c};line-height:1.3;'>{val}<span style='font-size:14px;font-weight:500;color:#626B7F;'> {unit}</span></div></div>")
+    pct = lambda n: f"{n / total * 100:.0f}%" if total else "0%"
+    extra = (stat("要確認", len(confirm_nos), "件", "#8A5A00") if confirm_nos else "") + \
+            (stat("エラー", len(err_nos), "件", "#B42318") if err_nos else "")
+    st.markdown(
+        f"<div style='padding:1.2rem 1.5rem;border-radius:16px;background:#fff;border:1px solid {'#F5C2BA' if n_ng else '#A7DBC5'};display:flex;align-items:center;gap:2rem;'>"
+        f"<div style='flex:1;'><div style='display:flex;gap:10px;align-items:center;'><span style='font-size:30px;font-weight:700;color:{color};'>{title}</span>"
+        f"<span style='height:24px;padding:0 10px;border-radius:12px;background:#EEF0F4;color:#454F63;font-size:12.5px;display:inline-flex;align-items:center;'>AI判定</span></div>{override}</div>"
+        + stat("チェック総数", total, "件") + stat("問題なし", f"{len(ok_nos)}", f"件 ・ {pct(len(ok_nos))}", "#0E6F4F")
+        + stat("要修正", n_ng, f"件 ・ {pct(n_ng)}", "#B42318") + extra + "</div>", unsafe_allow_html=True)
+
+    # ── 要修正 ──
+    if ng_nos:
+        st.markdown(f"<h3 style='margin:1.5rem 0 .5rem;'>要修正（{n_ng}件）</h3>", unsafe_allow_html=True)
+    for no in ng_nos:
+        _, findings = parsed[no - 1]
+        k = f"fb_{run_id}_{no}"
+        st_item = fb.get(no, {})
+        chip = ""
+        if st_item.get("v") == "agree":
+            chip = _badge("✓ 担当者：同意", "#0E6F4F", "#E6F6EF")
+        elif st_item.get("v") == "disagree":
+            chip = _badge("担当者：同意しない", "#B42318", "#fff", "#B42318")
+        with st.container(border=True):
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:12px;'><span style='font-size:13px;font-weight:700;color:#454F63;'>No.{no}</span>"
+                f"{_badge('要修正', '#B42318', '#FEF0EE', '#F5C2BA')}<span style='flex:1;font-size:16px;font-weight:700;'>{_md_esc(serifs[no - 1])}</span>{chip}</div>",
+                unsafe_allow_html=True)
+            col_main, col_fb = st.columns([2, 1])
+            with col_main:
+                for fi, f in enumerate(findings):
+                    if f.kind == "raw":
+                        st.markdown("<div style='font-size:13px;font-weight:700;color:#626B7F;'>AIの出力（形式を解析できませんでした）</div>", unsafe_allow_html=True)
+                        st.code(f.raw, language=None)
+                        continue
+                    hl = rp.highlight(serifs[no - 1], f.quote)
+                    shown = (f"{_md_esc(hl[0])}<mark style='background:#FDDAD5;padding:0 2px;border-radius:3px;'>{_md_esc(hl[1])}</mark>{_md_esc(hl[2])}"
+                             if hl else _md_esc(f.quote or serifs[no - 1]))
+                    label = "確認が必要な箇所" if f.kind == "confirm" else "違反箇所"
+                    st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>{label}</div><div style='font-size:16px;margin-bottom:.6rem;'>{shown}</div>",
+                                unsafe_allow_html=True)
+                    if f.reason:
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>理由</div><div>{_md_esc(f.reason)}</div>", unsafe_allow_html=True)
+                    if f.reference:
+                        ref = _md_esc(f.reference)
+                        reg = SERVICES[selected_service].get("reg_url", "")
+                        link = f"<a href='{_esc_attr(reg)}' target='_blank' style='text-decoration:none;'>{ref} ↗</a>" if reg else ref
+                        st.markdown(f"<div style='display:inline-block;margin:.3rem 0 .6rem;padding:2px 12px;border-radius:8px;background:#EFEBFF;color:#4A31C7;font-size:13px;'>{link}</div>",
+                                    unsafe_allow_html=True)
+                    for si, sg in enumerate(f.suggestions):
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>修正案{si + 1}</div>", unsafe_allow_html=True)
+                        st.code(sg, language=None)
+                if notes[no - 1]:
+                    st.caption(f"注釈：{notes[no - 1]}")
+                if arecs_all[no - 1]:
+                    st.markdown("<div style='font-size:13px;font-weight:700;color:#626B7F;margin-top:.4rem;'>査定実績</div>" + _assessment_cards_html(arecs_all[no - 1]),
+                                unsafe_allow_html=True)
+            with col_fb:
+                if not FEEDBACK_ENABLED:
+                    st.caption("フィードバック機能は未設定です。")
+                    continue
+                st.markdown("**担当者フィードバック**")
+                st.radio("判定", [_AGREE_LABEL, _DISAGREE_LABEL], index=None, key=k + "_v", horizontal=True, label_visibility="collapsed")
+                if st_item.get("v") is None:
+                    st.caption("「同意しない」を選ぶと、理由の入力が必要になります。入力した内容は、次回以降の審査に反映されます。")
+                else:
+                    st.button("選択を解除", key=k + "_clr",
+                              on_click=lambda kk=k: st.session_state.update({kk + "_v": None, kk + "_r": None, kk + "_m": ""}))
+                if st_item.get("v") == "disagree":
+                    st.radio("どこが違いますか？（必須）", [lb for _, lb in fbl.REASONS], index=None, key=k + "_r")
+                    if not st_item.get("reason"):
+                        st.markdown("<span style='color:#B42318;font-size:13px;'>理由を選んでください</span>", unsafe_allow_html=True)
+                    need = st_item.get("reason") == "other"
+                    st.text_area("メモ（必須）" if need else "メモ（任意）", key=k + "_m", height=84, max_chars=300,
+                                 placeholder="内容を入力（必須）" if need else "補足があれば入力（任意）")
+                    if need and not (st_item.get("memo") or "").strip():
+                        st.markdown("<span style='color:#B42318;font-size:13px;'>「その他」を選んだ場合は、内容を入力してください</span>", unsafe_allow_html=True)
+
+    # ── 要確認 / エラー ──
+    if confirm_nos:
+        st.markdown(f"<h3 style='margin:1.5rem 0 .5rem;'>要確認（{len(confirm_nos)}件）</h3>", unsafe_allow_html=True)
+        st.caption("台本テキストだけでは判定できない事項です。要修正の件数には含めていません。")
+        for no in confirm_nos:
+            with st.container(border=True):
+                st.markdown(f"**No.{no}**　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                for f in parsed[no - 1][1]:
+                    st.markdown(f"▼ {_md_esc(f.quote)}　{_md_esc(f.reason)}" if f.quote else f"▼ {_md_esc(f.reason)}", unsafe_allow_html=True)
+    if err_nos:
+        st.markdown(f"<h3 style='margin:1.5rem 0 .5rem;color:#B42318;'>チェックできなかった項目（{len(err_nos)}件）</h3>", unsafe_allow_html=True)
+        st.caption("APIエラー等で判定できませんでした。もう一度チェックを実行してください。")
+        for no in err_nos:
+            with st.container(border=True):
+                st.markdown(f"**No.{no}**　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                st.code(results[no - 1], language=None)
+
+    # ── 問題なし ──
+    if ok_nos:
+        st.markdown(f"<h3 style='margin:1.5rem 0 .25rem;'>問題なし（{len(ok_nos)}件）</h3>", unsafe_allow_html=True)
+        if FEEDBACK_ENABLED:
+            st.caption("違反があるのに「OK」になっている場合は、「見逃しとして報告」で知らせられます。")
+        show_all = st.session_state.get("ok_show_all_" + run_id, False)
+        shown_nos = ok_nos if show_all else ok_nos[:_OK_PREVIEW]
+        with st.container(border=True):
+            for no in shown_nos:
+                k = f"fb_{run_id}_{no}"
+                c_no, c_txt, c_btn = st.columns([1, 8, 3])
+                c_no.markdown(f"<span style='color:#626B7F;'>No.{no}</span>", unsafe_allow_html=True)
+                c_txt.markdown(f"<span style='color:#0E6F4F;font-weight:700;'>✓ OK</span>　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                if notes[no - 1]:
+                    c_txt.caption(notes[no - 1])
+                if arecs_all[no - 1]:
+                    c_txt.markdown(_assessment_cards_html(arecs_all[no - 1]), unsafe_allow_html=True)
+                if FEEDBACK_ENABLED:
+                    c_btn.checkbox("見逃しとして報告", key=k + "_x")
+                    if st.session_state.get(k + "_x"):
+                        st.text_area("どのレギュレーションに反していますか？（必須）", key=k + "_m", height=72, max_chars=300,
+                                     placeholder="例：「最安」は根拠の注釈が必要")
+                        if not (fb.get(no, {}).get("memo") or "").strip():
+                            st.markdown("<span style='color:#B42318;font-size:13px;'>内容を入力してください</span>", unsafe_allow_html=True)
+                st.divider()
+            if not show_all and len(ok_nos) > _OK_PREVIEW:
+                if st.button(f"残り{len(ok_nos) - _OK_PREVIEW}件を表示", key="ok_more_" + run_id, use_container_width=True):
+                    st.session_state["ok_show_all_" + run_id] = True
+                    st.rerun()
+
+    # ── コピー・CSV ──
+    lines, csv_rows = [], []
+    status_label = {rp.OK: "問題なし", rp.NG: "要修正", rp.CONFIRM: "要確認", rp.ERROR: "エラー"}
+    for no in range(1, total + 1):
+        status, findings = parsed[no - 1]
+        s_item = fb.get(no, {})
+        if status in (rp.NG, rp.CONFIRM):
+            for f in findings:
+                if f.kind == "fix":
+                    lines.append(f"No.{no} {f.quote} → " + " ／ ".join(f.suggestions) + (f"（{f.reason}）" if f.reason else ""))
+                else:
+                    lines.append(f"No.{no} {f.raw}")
+        if s_item.get("v") == "disagree":
+            judge = ("見逃しとして報告" if status == rp.OK else "同意しない：" + fbl.REASON_LABEL.get(s_item.get("reason", ""), ""))
+        elif s_item.get("v") == "agree":
+            judge = "同意"
+        else:
+            judge = ""
+        memo = (s_item.get("memo") or "").strip() if s_item.get("v") == "disagree" else ""
+        base = {"No.": no, "セリフ": serifs[no - 1], "注釈": notes[no - 1], "AI判定": status_label[status]}
+        # 指摘ごとに1行（複数の指摘・要確認を取りこぼさない）。担当者の判断は先頭行だけに入れる。
+        rows_for_item = findings if findings else [None]
+        for fi, f in enumerate(rows_for_item):
+            sugg = f.suggestions if f else []
+            csv_rows.append({
+                **base,
+                "違反箇所": (f.quote or "") if f else "", "理由": f.reason if f else "", "参照": f.reference if f else "",
+                "修正案1": sugg[0] if len(sugg) > 0 else "", "修正案2": sugg[1] if len(sugg) > 1 else "",
+                "AIの出力（解析不可の場合）": f.raw if f and f.kind == "raw" else "",
+                "担当者の判断": judge if fi == 0 else "", "担当者メモ": memo if fi == 0 else "",
+            })
+    st.divider()
+    cc1, cc2 = st.columns([1, 1])
+    with cc1:
+        with st.expander("指摘をまとめてコピー"):
+            st.code("\n".join(lines) if lines else "指摘はありません。", language=None)
+    with cc2:
+        st.download_button("CSVでダウンロード", pd.DataFrame(csv_rows).to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"script_check_{datetime.utcnow():%Y%m%d_%H%M}.csv", mime="text/csv", use_container_width=True)
+
+    # ── 保存 ──
+    if not FEEDBACK_ENABLED:
+        return
+    msg = f"フィードバック入力済み：**{S['input_count']}件**"
+    if S["error_count"]:
+        msg += f"　　:red[未入力の項目が{S['error_count']}件あります]"
+    elif is_saved:
+        msg += f"　　:green[保存済み（{entry['at']} UTC）]"
+    elif is_dirty:
+        msg += "　　未保存の変更があります"
+    st.markdown(msg)
+    if only_agree:
+        st.caption("「判定に同意」だけの場合は、保存する内容がありません（学習に使うのは「同意しない」のみです）。")
+    can_save = is_dirty
+    confirm_key = "fb_confirm_" + run_id
+    if st.button("保存済み" if is_saved else "フィードバックを保存", type="primary", disabled=not can_save, key="fb_open_" + run_id):
+        st.session_state[confirm_key] = True
+        st.rerun()
+    if st.session_state.get(confirm_key) and can_save:
+        with st.container(border=True):
+            st.markdown("**フィードバックを保存しますか？**")
+            st.caption("保存した内容は、次回以降のAI審査に反映されます（全担当者共通）。")
+            n_retract = sum(1 for r in pending_rows if r["verdict"] == "retract")
+            st.markdown(f"- 判定に同意：{S['agree']}件（学習には使用しません）\n- 同意しない：{S['disagree']}件"
+                        + (f"\n- 保存済みの「同意しない」の取り消し：{n_retract}件" if n_retract else "")
+                        + (f"\n- 担当者の判断（要修正）：{S['final_count']}件（AI判定は{S['ai_count']}件）" if S["has_override"] else ""))
+            b1, b2, _ = st.columns([1, 1, 4])
+            if b1.button("保存する", type="primary", key="fb_do_" + run_id):
+                rows, new_prev = fbl.plan_save(entry["prev"] if entry else {}, items, fb)
+                if save_feedback_rows(selected_service, user_email, run_id, rows):
+                    load_feedback.clear()
+                    st.session_state["fb_saved"][run_id] = {"prev": new_prev, "at": datetime.utcnow().strftime("%m/%d %H:%M")}
+                    st.session_state[confirm_key] = False
+                    st.toast("フィードバックを保存しました")
+                    st.rerun()
+            if b2.button("キャンセル", key="fb_cancel_" + run_id):
+                st.session_state[confirm_key] = False
+                st.rerun()
+
+
 # ─── 管理者ダッシュボード ─────────────────────────────────────────────────────
+def _kpi_card(label: str, value: str, unit: str = "", sub: str = "&nbsp;", big: bool = False) -> str:
+    size = "2.4rem" if big else "1.7rem"
+    unit_html = f"<span style='font-size:.8rem;font-weight:500;color:#626B7F;'> {unit}</span>" if unit else ""
+    return (
+        f"<div style='flex:{'0 0 22%' if big else '1'};min-width:0;box-sizing:border-box;padding:1rem 1.1rem;"
+        f"border-radius:14px;background:#fff;border:1px solid #E3E6EB;'>"
+        f"<div style='font-size:.82rem;color:#454F63;'>{label}</div>"
+        f"<div style='font-size:{size};font-weight:700;line-height:1.3;color:#1B2230;'>{value}{unit_html}</div>"
+        f"<div style='font-size:.78rem;color:#626B7F;'>{sub}</div></div>"
+    )
+
+
 def show_admin_dashboard() -> None:
-    st.markdown("<div style='margin-bottom:1rem;'><span style='font-size:1.3rem;font-weight:700;color:#0F172A;'>📊 利用状況ダッシュボード</span></div>", unsafe_allow_html=True)
+    import dashboard_logic as dl
+
+    st.markdown("<div style='margin-bottom:.25rem;'><span style='font-size:1.6rem;font-weight:700;color:#1B2230;'>利用状況ダッシュボード</span></div>"
+                "<p style='color:#454F63;margin:0 0 1rem;'>台本チェックの利用量とAPIコストを確認します。</p>", unsafe_allow_html=True)
 
     if not FEEDBACK_ENABLED:
         missing = []
@@ -1134,135 +1497,146 @@ def show_admin_dashboard() -> None:
         st.warning(f"Google Sheets 連携が未設定のため、利用ログを表示できません。\n\n**未設定項目：**\n{items}")
         return
 
-    col_refresh, col_note = st.columns([1, 4])
-    with col_refresh:
+    if "usage_loaded_at" not in st.session_state:
+        st.session_state["usage_loaded_at"] = datetime.utcnow()
+    _c_stamp, _c_btn = st.columns([4, 1])
+    with _c_stamp:
+        st.caption(f"最終更新　{st.session_state['usage_loaded_at']:%m/%d %H:%M}（UTC）")
+    with _c_btn:
         if st.button("🔄 データ更新", use_container_width=True):
             load_usage_log.clear()
+            st.session_state["usage_loaded_at"] = datetime.utcnow()
             st.rerun()
-    with col_note:
-        st.markdown(
-            f"<span style='color:#94A3B8;font-size:0.8rem;'>コスト計算基準：{MODEL_NAME} / 入力 ${INPUT_PRICE_PER_1M_USD}/1M・出力 ${OUTPUT_PRICE_PER_1M_USD}/1M・キャッシュ書込5分 ${CACHE_WRITE_5M_PRICE_PER_1M_USD}/1M・1時間 ${CACHE_WRITE_1H_PRICE_PER_1M_USD}/1M・読込 ${CACHE_READ_PRICE_PER_1M_USD}/1M</span>",
-            unsafe_allow_html=True,
-        )
 
-    df = load_usage_log()
-    if df.empty:
+    raw = load_usage_log()
+    if raw.empty:
         st.info("まだ利用ログがありません。")
         return
+    df_all = dl.prepare(raw)
+    min_dt, max_dt = df_all["date"].min(), df_all["date"].max()
+    today = datetime.utcnow().date()
 
-    min_dt = df["timestamp_utc"].min().date()
-    max_dt = df["timestamp_utc"].max().date()
-    col_from, col_to, _ = st.columns([1, 1, 3])
-    with col_from:
-        date_from = st.date_input("開始日", value=min_dt, min_value=min_dt, max_value=max_dt)
-    with col_to:
-        date_to = st.date_input("終了日", value=max_dt, min_value=min_dt, max_value=max_dt)
-    df = df[(df["timestamp_utc"].dt.date >= date_from) & (df["timestamp_utc"].dt.date <= date_to)]
+    _c_p, _c_d = st.columns([2, 3])
+    with _c_p:
+        preset_label = st.radio("期間", ["直近7日", "直近30日", "全期間", "期間指定"], index=2,
+                                horizontal=True, key="dash_period")
+    if preset_label == "期間指定":
+        with _c_d:
+            picked = st.date_input("開始日〜終了日（UTC）", value=(min_dt, max_dt), key="dash_range")
+        if not (isinstance(picked, (tuple, list)) and len(picked) == 2):
+            st.info("終了日も選択してください。")
+            return
+        start, end = picked
+    else:
+        start, end = dl.period_bounds({"直近7日": "7d", "直近30日": "30d", "全期間": "all"}[preset_label],
+                                      today, min_dt, max_dt)
+    st.caption(f"{start:%Y/%m/%d} 〜 {end:%Y/%m/%d}　日付はUTC基準")
 
+    df = dl.filter_period(df_all, start, end)
     if df.empty:
         st.warning("選択期間にデータがありません。")
         return
 
-    # Legacy data warning
-    if df.get("is_legacy", pd.Series([False])).any():
-        st.warning("⚠️ 選択期間には旧ロジック（キャッシュトークン未計上）のデータが含まれています。コスト合計は実際より低く表示される場合があります。")
+    S = dl.summarize(df, USD_JPY)
 
-    total_users = df["user_email"].nunique()
-    total_audits = len(df)
-    total_rows = int(df["row_count"].sum())
-    total_cost_usd = df["cost_usd"].sum()
-    avg_cost_jpy = (total_cost_usd / total_audits * USD_JPY) if total_audits > 0 else 0
+    if S["has_old_logic"] and st.session_state.get("dash_hide_banner") != (start, end):
+        _cb, _cx = st.columns([12, 1])
+        with _cb:
+            st.warning("選択期間には旧ロジック（キャッシュトークン未計上）のデータが含まれています。コスト合計は実際より低く表示される場合があります。")
+        with _cx:
+            if st.button("✕", key="dash_close_banner", help="閉じる"):
+                st.session_state["dash_hide_banner"] = (start, end)
+                st.rerun()
 
-    total_input = int(df["input_tokens"].sum())
-    total_cw5 = int(df["cache_write_5m"].sum())
-    total_cw1 = int(df["cache_write_1h"].sum())
-    total_cr = int(df["cache_read_tokens"].sum())
-    total_out = int(df["output_tokens"].sum())
-    total_total_input = total_input + total_cw5 + total_cw1 + total_cr
-    cache_read_rate = (total_cr / total_total_input * 100) if total_total_input > 0 else 0
+    legacy_note = f"旧ログ{S['legacy_runs']}回は含まず" if S["legacy_runs"] else "&nbsp;"
+    avg_sub = (f"{S['avg_cost_usd']*100:.2f}¢ USD ／ 計上済み{S['costed_runs']}回で計算"
+               if S["costed_runs"] else "コスト計上済みの実行なし")
+    st.markdown(
+        "<div style='display:flex;gap:12px;margin:.5rem 0 1rem;'>"
+        + _kpi_card("コスト合計", f"${S['total_cost_usd']:.2f}", sub=f"¥{S['total_cost_jpy']:,.0f}相当", big=True)
+        + _kpi_card("審査実行回数", f"{S['runs']:,}", "回")
+        + _kpi_card("セリフ審査総数", f"{S['rows']:,}", "件")
+        + _kpi_card("1回あたり平均コスト", f"¥{S['avg_cost_jpy']:.1f}", sub=avg_sub)
+        + _kpi_card("利用ユーザー数", f"{S['users']:,}", "名", sub=legacy_note)
+        + "</div>", unsafe_allow_html=True)
 
-    st.markdown(f"""
-    <div class="kpi-row">
-      <div class="kpi-card total"><div class="kpi-label">利用ユーザー数</div><div class="kpi-value">{total_users}</div><div class="kpi-sub">名</div></div>
-      <div class="kpi-card ok"><div class="kpi-label">審査実行回数</div><div class="kpi-value">{total_audits}</div><div class="kpi-sub">回</div></div>
-      <div class="kpi-card ng"><div class="kpi-label">セリフ審査総数</div><div class="kpi-value">{total_rows:,}</div><div class="kpi-sub">件</div></div>
-      <div class="kpi-card purple"><div class="kpi-label">コスト合計</div><div class="kpi-value">${total_cost_usd:.2f}</div><div class="kpi-sub">USD（¥{total_cost_usd*USD_JPY:.0f}相当）</div></div>
-      <div class="kpi-card total"><div class="kpi-label">1回あたり平均コスト</div><div class="kpi-value">¥{avg_cost_jpy:.1f}</div><div class="kpi-sub">({total_cost_usd/total_audits*100:.2f}¢ USD)</div></div>
-    </div>
-    <div class="kpi-row">
-      <div class="kpi-card total"><div class="kpi-label">入力合計（キャッシュ込み）</div><div class="kpi-value">{total_total_input:,}</div><div class="kpi-sub">tokens</div></div>
-      <div class="kpi-card ok"><div class="kpi-label">うちキャッシュ読み取り</div><div class="kpi-value">{total_cr:,}</div><div class="kpi-sub">tokens（読取率 {cache_read_rate:.1f}%）</div></div>
-      <div class="kpi-card ng"><div class="kpi-label">うちキャッシュ書き込み</div><div class="kpi-value">{total_cw5+total_cw1:,}</div><div class="kpi-sub">tokens（5分: {total_cw5:,} / 1時間: {total_cw1:,}）</div></div>
-      <div class="kpi-card purple"><div class="kpi-label">出力トークン合計</div><div class="kpi-value">{total_out:,}</div><div class="kpi-sub">tokens</div></div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── トークン使用量 ──
+    T, P = S["tokens"], S["pct"]
+    seg = lambda w, c, t: (f"<div style='flex:{max(w, 0.0001):.2f};min-width:0;border-radius:4px;background:{c};color:#fff;"
+                           f"font-size:.75rem;font-weight:700;display:flex;align-items:center;padding-left:8px;'>{t}</div>")
+    legend = lambda c, n, v, extra="": (f"<div style='display:flex;gap:8px;align-items:flex-start;'><span style='width:12px;height:12px;"
+                                         f"border-radius:3px;background:{c};margin-top:6px;'></span><div><div>{n}</div>"
+                                         f"<div style='color:#454F63;'>{v:,}{extra}</div></div></div>")
+    st.markdown(
+        "<div style='padding:1.1rem 1.3rem;border-radius:14px;background:#fff;border:1px solid #E3E6EB;'>"
+        f"<div style='display:flex;justify-content:space-between;'><b style='font-size:1.1rem;'>トークン使用量</b>"
+        f"<span style='font-size:.85rem;color:#454F63;'>入力合計 <b>{T['total_input']:,}</b> ・ 出力 <b>{T['output']:,}</b> tokens</span></div>"
+        f"<div role='img' aria-label='入力トークンの内訳：通常入力{P['input']:.1f}%、キャッシュ読み取り{P['cache_read']:.1f}%、キャッシュ書き込み{P['cache_write']:.1f}%' "
+        "style='display:flex;gap:2px;height:28px;margin:.8rem 0;'>"
+        + seg(P["input"], "#257DE0", f"{P['input']:.1f}%") + seg(P["cache_read"], "#F47230", f"{P['cache_read']:.1f}%")
+        + seg(P["cache_write"], "#00B894", f"{P['cache_write']:.1f}%") + "</div>"
+        "<div style='display:flex;gap:2.5rem;font-size:.85rem;'>"
+        + legend("#257DE0", "通常入力", T["input"]) + legend("#F47230", "キャッシュ読み取り", T["cache_read"])
+        + legend("#00B894", "キャッシュ書き込み", T["cache_write"],
+                 f"<span style='color:#626B7F;font-size:.78rem;'>　（5分 {T['cache_write_5m']:,} ／ 1時間 {T['cache_write_1h']:,}）</span>")
+        + "</div></div>", unsafe_allow_html=True)
 
-    # ── 日別消費量 ────────────────────────────────────────────────────────────
-    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>📅 日別消費量（UTC基準）</h2>", unsafe_allow_html=True)
-    daily = (
-        df.assign(日付=df["timestamp_utc"].dt.date)
-        .groupby("日付")
-        .agg(
-            審査回数=("row_count", "count"),
-            セリフ数=("row_count", "sum"),
-            入力Token=("input_tokens", "sum"),
-            キャッシュ書込5m=("cache_write_5m", "sum"),
-            キャッシュ書込1h=("cache_write_1h", "sum"),
-            キャッシュ読込Token=("cache_read_tokens", "sum"),
-            出力Token=("output_tokens", "sum"),
-            コスト_USD=("cost_usd", "sum"),
-        )
-        .reset_index()
-        .sort_values("日付")
-    )
-    daily["入力合計Token"] = daily["入力Token"] + daily["キャッシュ書込5m"] + daily["キャッシュ書込1h"] + daily["キャッシュ読込Token"]
-    daily["コスト_円"] = (daily["コスト_USD"] * USD_JPY).round(0).astype(int)
-    daily["読取率%"] = (daily["キャッシュ読込Token"] / daily["入力合計Token"].replace(0, 1) * 100).round(1)
+    # ── 日別コスト ──
+    st.markdown("<h3 style='margin:1.5rem 0 .25rem;'>日別コスト <span style='font-size:.8rem;font-weight:400;color:#626B7F;'>単位：円</span></h3>",
+                unsafe_allow_html=True)
+    daily = dl.daily_costs(df, start, end, USD_JPY)
     daily["日付"] = daily["日付"].astype(str)
+    st.bar_chart(daily.set_index("日付")[["コスト円"]].rename(columns={"コスト円": "コスト（円）"}), color="#257DE0", height=220)
+    with st.expander(f"日別の表を表示（{len(daily)}日）"):
+        shown = daily.rename(columns={"コストUSD": "コスト(USD)", "コスト円": "コスト(円)"})
+        shown["コスト(USD)"] = shown["コスト(USD)"].round(4)
+        st.dataframe(shown, use_container_width=True, hide_index=True)
 
-    chart_col, _ = st.columns([3, 1])
-    with chart_col:
-        st.bar_chart(
-            daily.set_index("日付")[["コスト_円"]],
-            color=["#6EE7B7"],
-            height=220,
-        )
+    # ── ユーザー別 ──
+    st.markdown("<h3 style='margin:1.5rem 0 .25rem;'>ユーザー別利用状況</h3>", unsafe_allow_html=True)
+    ut = dl.by_user(df)
+    if ut.empty:
+        st.caption("ユーザー情報のある利用はありません。")
+    else:
+        ut["最終利用"] = ut["最終利用"].dt.strftime("%Y/%m/%d %H:%M")
+        ut["コストUSD"] = ut["コストUSD"].round(2)
+        st.dataframe(ut.rename(columns={"コストUSD": "コスト（USD）"}), use_container_width=True, hide_index=True)
 
-    display_daily = daily.rename(columns={"コスト_USD": "コスト(USD)", "コスト_円": "コスト(円)"})[
-        ["日付", "審査回数", "セリフ数", "入力Token", "キャッシュ書込5m", "キャッシュ書込1h",
-         "キャッシュ読込Token", "入力合計Token", "出力Token", "読取率%", "コスト(USD)", "コスト(円)"]
-    ].copy()
-    display_daily["コスト(USD)"] = display_daily["コスト(USD)"].round(4)
-    st.dataframe(display_daily, use_container_width=True, hide_index=True)
+    # ── サービス別（旧ログ）──
+    lt = dl.by_service_legacy(df)
+    if not lt.empty:
+        st.markdown("<h3 style='margin:1.5rem 0 .25rem;'>サービス別（旧ログ） "
+                    "<span style='font-size:.75rem;font-weight:400;color:#626B7F;border:1px solid #D0D5DD;border-radius:999px;padding:.1em .6em;'>ユーザー情報なし</span></h3>",
+                    unsafe_allow_html=True)
+        lt["備考"] = "トークン・コストは未計上"
+        st.dataframe(lt, use_container_width=True, hide_index=True)
 
-    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>👤 ユーザー別利用状況</h2>", unsafe_allow_html=True)
-    user_summary = (
-        df.groupby("user_email")
-        .agg(
-            審査回数=("row_count", "count"),
-            セリフ審査数=("row_count", "sum"),
-            入力Token合計=("input_tokens", "sum"),
-            キャッシュ読込Token=("cache_read_tokens", "sum"),
-            出力Token合計=("output_tokens", "sum"),
-            推定コスト_USD=("cost_usd", "sum"),
-            最終利用日時=("timestamp_utc", "max"),
-        )
-        .reset_index().rename(columns={"user_email": "メールアドレス"})
-        .sort_values("審査回数", ascending=False)
-    )
-    user_summary["推定コスト_USD"] = user_summary["推定コスト_USD"].round(4)
-    user_summary["最終利用日時"] = user_summary["最終利用日時"].dt.strftime("%Y-%m-%d %H:%M")
-    st.dataframe(user_summary, use_container_width=True, hide_index=True)
-
-    st.markdown("<h2 style='margin:1.5rem 0 0.5rem;'>🕐 直近の利用履歴</h2>", unsafe_allow_html=True)
-    recent = df.sort_values("timestamp_utc", ascending=False).head(100).copy()
-    recent["日時(UTC)"] = recent["timestamp_utc"].dt.strftime("%Y-%m-%d %H:%M")
-    recent = recent.rename(columns={
-        "user_email": "メール", "service": "サービス", "row_count": "セリフ数",
-        "input_tokens": "入力Token", "cache_read_tokens": "キャッシュ読込", "output_tokens": "出力Token", "cost_usd": "コスト(USD)"
+    # ── 直近の利用履歴 ──
+    st.markdown("<h3 style='margin:1.5rem 0 .25rem;'>直近の利用履歴 <span style='font-size:.8rem;font-weight:400;color:#626B7F;'>時刻はUTC</span></h3>",
+                unsafe_allow_html=True)
+    hist = df[~df["is_legacy_log"]].sort_values("timestamp_utc", ascending=False)
+    hist_view = pd.DataFrame({
+        "日時": hist["timestamp_utc"].dt.strftime("%Y/%m/%d %H:%M"), "ユーザー": hist["user_email"],
+        "サービス": hist["service_name"], "セリフ数": hist["row_count"], "入力Token": hist["input_tokens"],
+        "キャッシュ書込": hist["cache_write_5m"] + hist["cache_write_1h"], "キャッシュ読込": hist["cache_read_tokens"],
+        "出力Token": hist["output_tokens"], "コスト（USD）": hist["cost_usd"].round(4),
     })
-    display_cols = ["日時(UTC)", "メール", "サービス", "セリフ数", "入力Token", "キャッシュ読込", "出力Token", "コスト(USD)"]
-    st.dataframe(recent[[c for c in display_cols if c in recent.columns]], use_container_width=True, hide_index=True)
+    _limit_key = "dash_hist_limit"
+    st.session_state.setdefault(_limit_key, 20)
+    _, _c_csv = st.columns([4, 1])
+    with _c_csv:
+        st.download_button("CSVでダウンロード", hist_view.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"usage_{start:%Y%m%d}_{end:%Y%m%d}.csv", mime="text/csv",
+                           use_container_width=True, help="選択期間の全件（UTC）")
+    st.dataframe(hist_view.head(st.session_state[_limit_key]), use_container_width=True, hide_index=True)
+    if len(hist_view) > st.session_state[_limit_key]:
+        if st.button(f"もっと見る（残り{len(hist_view) - st.session_state[_limit_key]}件）", key="dash_more"):
+            st.session_state[_limit_key] += 20
+            st.rerun()
+
+    st.caption(f"コスト計算基準：{MODEL_NAME} ／ 入力 ${INPUT_PRICE_PER_1M_USD} ・ 出力 ${OUTPUT_PRICE_PER_1M_USD} ・ "
+               f"キャッシュ書込（5分 ${CACHE_WRITE_5M_PRICE_PER_1M_USD} ・ 1時間 ${CACHE_WRITE_1H_PRICE_PER_1M_USD}）・ "
+               f"キャッシュ読込 ${CACHE_READ_PRICE_PER_1M_USD}（いずれも100万トークンあたり）／ 為替 ¥{USD_JPY}/USD")
 
 
 # ─── プロンプト管理タブ（管理者のみ） ────────────────────────────────────────
@@ -1462,7 +1836,7 @@ with tab_main:
                 st.session_state.prompt_sections[selected_service].pop("審査基準", None)
             st.rerun()
         if FEEDBACK_ENABLED:
-            fb_count = len(load_user_feedback(selected_service, user_email))
+            fb_count = len(load_feedback(selected_service))
             st.markdown(
                 f"<p style='color:#64748B;font-size:0.8rem;margin-top:0.75rem;'>蓄積フィードバック：<strong style='color:#CBD5E1;'>{fb_count}件</strong></p>",
                 unsafe_allow_html=True,
@@ -1620,7 +1994,7 @@ with tab_main:
             _va_label = _va_tab["label"]
             _va_df = get_assessment_df(_va_url)
 
-        past_feedback = load_user_feedback(selected_service, user_email)
+        past_feedback = load_feedback(selected_service)
 
         serif_list: list[str] = []
         chusyaku_list: list[str] = []
@@ -1755,6 +2129,7 @@ with tab_main:
             "chusyaku_list": chusyaku_list,
             "result_list": result_list,
             "assessment_records_list": assessment_records_list,
+            "run_id": run_id,
         }
 
     # ─── 審査結果表示 ─────────────────────────────────────────────────────────
@@ -1762,167 +2137,7 @@ with tab_main:
         "audit_results" in st.session_state
         and st.session_state.audit_results.get("service") == selected_service
     ):
-        results = st.session_state.audit_results
-        serif_list: list[str] = results["serif_list"]
-        chusyaku_list: list[str] = results["chusyaku_list"]
-        result_list: list[str] = results["result_list"]
-        assessment_records_list: list[list[dict[str, str]]] = results.get("assessment_records_list", [[] for _ in serif_list])
-        total: int = len(serif_list)
-
-        ok_count = sum(1 for r in result_list if is_ok(r))
-        ng_count = total - ok_count
-
-        st.divider()
-        st.markdown(f"""
-        <div class="kpi-row">
-          <div class="kpi-card total"><div class="kpi-label">チェック総数</div><div class="kpi-value">{total}</div><div class="kpi-sub">件</div></div>
-          <div class="kpi-card ok"><div class="kpi-label">問題なし</div><div class="kpi-value">{ok_count}</div><div class="kpi-sub">{ok_count/total*100:.0f}%</div></div>
-          <div class="kpi-card ng"><div class="kpi-label">修正あり</div><div class="kpi-value">{ng_count}</div><div class="kpi-sub">{ng_count/total*100:.0f}%</div></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("<h2 style='margin-bottom:0.5rem;'>✅ チェック結果</h2>", unsafe_allow_html=True)
-        _has_assessment = any(recs for recs in assessment_records_list)
-
-        def _assessment_cell(recs: list[dict[str, str]]) -> str:
-            if not recs:
-                return "<td class='cell cell-assessment'></td>"
-            cards = ""
-            for rec in recs:
-                num = rec.get("number", "")
-                detail = rec.get("detail", "")
-                num_html = f"<div class='anum'>{_esc(num)}</div>" if num else ""
-                detail_html = f"<div class='adetail'>{_esc(detail)}</div>" if detail else ""
-                cards += f"<div class='acard'>{num_html}{detail_html}</div>"
-            return f"<td class='cell cell-assessment'>{cards}</td>"
-
-        rows_html = "".join(
-            f"<tr>"
-            f"<td class='cell cell-status'><span class='badge {'badge-ok' if is_ok(r) else 'badge-ng'}'>{'OK' if is_ok(r) else '要修正'}</span></td>"
-            f"<td class='cell cell-serif'>{_esc(s)}</td>"
-            f"<td class='cell cell-note'>{_esc(c)}</td>"
-            + (_assessment_cell(arecs) if _has_assessment else "")
-            + f"<td class='cell cell-result'>"
-            + (
-                f"<button class='copy-btn' data-t=\"{_esc_attr(r)}\">📋</button>{_esc(r)}"
-                if not is_ok(r) else ""
-            )
-            + f"</td></tr>"
-            for s, c, r, arecs in zip(serif_list, chusyaku_list, result_list, assessment_records_list)
-        )
-        est_height = max(300, len(result_list) * 130 + 80)
-        _assessment_th = "<th>査定実績</th>" if _has_assessment else ""
-        components.html(
-            f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
-table{{width:100%;border-collapse:collapse;font-size:13.5px;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.07);}}
-th{{background:#F8FAFC;padding:11px 14px;border-bottom:2px solid #E2E8F0;text-align:left;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:#64748B;}}
-tr{{border-bottom:1px solid #F1F5F9;transition:background .1s;}}
-tr:last-child{{border-bottom:none;}}
-tr:hover{{background:#FAFBFF;}}
-.cell{{padding:12px 14px;vertical-align:top;white-space:pre-wrap;word-break:break-word;line-height:1.65;color:#374151;}}
-.cell-status{{width:6%;text-align:center;}}
-.cell-serif{{width:{'18%' if _has_assessment else '24%'};}}
-.cell-note{{width:9%;color:#6B7280;font-size:.85em;}}
-.cell-assessment{{width:{'17%' if _has_assessment else '0'};}}
-.cell-result{{width:{'50%' if _has_assessment else '61%'};}}
-.badge{{display:inline-block;padding:.25em .65em;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.03em;white-space:nowrap;}}
-.badge-ok{{background:#DCFCE7;color:#15803D;}}
-.badge-ng{{background:#FEF3C7;color:#B45309;}}
-.acard{{background:#F8FAFF;border:1px solid #DBEAFE;border-radius:6px;padding:6px 8px;margin-bottom:5px;font-size:.82em;}}
-.acard:last-child{{margin-bottom:0;}}
-.anum{{font-weight:700;color:#1D4ED8;margin-bottom:2px;}}
-.adetail{{color:#374151;line-height:1.5;white-space:normal;}}
-.copy-btn{{background:none;border:1px solid #E2E8F0;border-radius:4px;padding:.12em .55em;cursor:pointer;font-size:.72rem;color:#94A3B8;float:right;margin-left:.5rem;line-height:1.5;transition:all .15s;white-space:nowrap;}}
-.copy-btn:hover{{background:#EFF6FF;color:#3B82F6;border-color:#93C5FD;}}
-</style>
-</head><body>
-<table>
-<thead><tr><th>判定</th><th>セリフ</th><th>注釈</th>{_assessment_th}<th>チェック結果</th></tr></thead>
-<tbody>{rows_html}</tbody>
-</table>
-<script>
-document.addEventListener('click',function(e){{
-  var btn=e.target;
-  if(!btn.classList.contains('copy-btn'))return;
-  var t=btn.dataset.t;
-  function done(){{
-    btn.textContent='✅ コピーしました';
-    btn.style.background='#DCFCE7';btn.style.color='#15803D';btn.style.borderColor='#86EFAC';
-    setTimeout(function(){{btn.textContent='📋';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},2000);
-  }}
-  function fb(){{
-    var ta=document.createElement('textarea');
-    ta.value=t;ta.style.cssText='position:fixed;left:-9999px;';
-    document.body.appendChild(ta);ta.focus();ta.select();
-    try{{document.execCommand('copy');}}catch(ex){{}}
-    document.body.removeChild(ta);done();
-  }}
-  var cb=(window.parent&&window.parent.navigator&&window.parent.navigator.clipboard)||navigator.clipboard;
-  if(cb&&cb.writeText){{cb.writeText(t).then(done,fb);}}else{{fb();}}
-}});
-</script>
-</body></html>""",
-            height=est_height,
-            scrolling=True,
-        )
-
-        # ─── フィードバック入力 ──────────────────────────────────────────────
-        if FEEDBACK_ENABLED:
-            st.divider()
-            st.markdown("""
-            <h2 style='margin-bottom:0.25rem;'>💬 担当者フィードバック
-                <span class="feedback-badge">学習機能</span>
-            </h2>
-            <p style="color:#64748B;font-size:0.82rem;margin-bottom:0.75rem;">
-            AIの判断に補足・修正があれば記入して保存してください。次回以降の審査に自動反映されます。
-            </p>
-            """, unsafe_allow_html=True)
-
-            def _trunc(text: str, n: int) -> str:
-                t = text.strip()
-                return (t[:n] + "…") if len(t) > n else t
-
-            feedback_base_df = pd.DataFrame({
-                "No.": list(range(1, total + 1)),
-                "判定": ["OK" if is_ok(r) else "要修正" for r in result_list],
-                "セリフ": [_trunc(s, 40) for s in serif_list],
-                "チェック結果": [_trunc(r, 120) for r in result_list],
-                "担当者フィードバック": [""] * total,
-            })
-            edited_feedback: pd.DataFrame = st.data_editor(
-                feedback_base_df,
-                key=f"feedback_editor_{selected_service}",
-                column_config={
-                    "No.": st.column_config.NumberColumn("No.", width="small", disabled=True),
-                    "判定": st.column_config.TextColumn("判定", width="small", disabled=True),
-                    "セリフ": st.column_config.TextColumn("セリフ", width="medium", disabled=True),
-                    "チェック結果": st.column_config.TextColumn("チェック結果", width="large", disabled=True),
-                    "担当者フィードバック": st.column_config.TextColumn(
-                        "担当者フィードバック", width="large",
-                        help="AIの判断が誤り・不足の場合に記入。次回以降の審査に反映されます。",
-                    ),
-                },
-                use_container_width=True,
-                height=min(140 + total * 90, 700),
-                hide_index=True,
-            )
-
-            if st.button("💾 フィードバックを保存", type="primary"):
-                rows_to_save = []
-                for i in range(total):
-                    fb_val = str(edited_feedback.iloc[i]["担当者フィードバック"]).strip()
-                    if fb_val:
-                        rows_to_save.append({"serif": serif_list[i], "chusyaku": chusyaku_list[i], "ai_result": result_list[i], "feedback": fb_val})
-                if rows_to_save:
-                    saved = save_feedback_rows(selected_service, user_email, rows_to_save)
-                    if saved > 0:
-                        load_user_feedback.clear()
-                        st.success(f"✅ {saved}件のフィードバックを保存しました。次回の審査から反映されます。")
-                else:
-                    st.info("フィードバックが入力されていません。")
+        render_script_results(selected_service, user_email)
 
 # ─── 記事チェックタブ ─────────────────────────────────────────────────────────
 with tab_article:
