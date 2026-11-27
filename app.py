@@ -1154,7 +1154,30 @@ def _stepper_html(saved: bool) -> str:
     return "<div style='display:flex;align-items:center;gap:10px;margin:.5rem 0 1rem;'>" + "".join(parts) + "</div>"
 
 
+def _fb_sync(run_id: str, statuses: dict[int, str]) -> None:
+    """ウィジェットの値を別領域に退避・復元する。Streamlitは描画されなかったウィジェットの値を捨てるため、
+    サービス切替などで結果が一時的に非表示になっても、入力中のフィードバックが消えないようにする。"""
+    ss = st.session_state
+    store = ss.setdefault("fb_store", {})
+    for no in statuses:
+        for suffix in ("_v", "_r", "_m", "_x"):
+            key = f"fb_{run_id}_{no}{suffix}"
+            if key in ss:
+                store[key] = ss[key]
+            elif key in store:
+                ss[key] = store[key]
+
+
+def _md_esc(text: str) -> str:
+    """HTMLエスケープに加え、Markdown/KaTeXとして解釈される記号を数値参照にする。"""
+    t = _esc(text)
+    for ch, ref in (("$", "&#36;"), ("~", "&#126;"), ("*", "&#42;"), ("`", "&#96;"), ("_", "&#95;")):
+        t = t.replace(ch, ref)
+    return t
+
+
 def _fb_collect(run_id: str, statuses: dict[int, str]) -> dict[int, dict]:
+    _fb_sync(run_id, statuses)
     ss = st.session_state
     fb: dict[int, dict] = {}
     for no, s in statuses.items():
@@ -1203,7 +1226,8 @@ def render_script_results(selected_service: str, user_email: str) -> None:
     entry = st.session_state.setdefault("fb_saved", {}).get(run_id)
     pending_rows, _ = fbl.plan_save(entry["prev"] if entry else {}, items, fb)
     is_saved = bool(entry) and not pending_rows
-    is_dirty = (not is_saved) and S["input_count"] > 0 and S["error_count"] == 0
+    is_dirty = bool(pending_rows) and S["error_count"] == 0
+    only_agree = S["input_count"] > 0 and not entry and not pending_rows
 
     st.divider()
     head_l, head_r = st.columns([4, 1])
@@ -1262,7 +1286,7 @@ def render_script_results(selected_service: str, user_email: str) -> None:
         with st.container(border=True):
             st.markdown(
                 f"<div style='display:flex;align-items:center;gap:12px;'><span style='font-size:13px;font-weight:700;color:#454F63;'>No.{no}</span>"
-                f"{_badge('要修正', '#B42318', '#FEF0EE', '#F5C2BA')}<span style='flex:1;font-size:16px;font-weight:700;'>{_esc(serifs[no - 1])}</span>{chip}</div>",
+                f"{_badge('要修正', '#B42318', '#FEF0EE', '#F5C2BA')}<span style='flex:1;font-size:16px;font-weight:700;'>{_md_esc(serifs[no - 1])}</span>{chip}</div>",
                 unsafe_allow_html=True)
             col_main, col_fb = st.columns([2, 1])
             with col_main:
@@ -1272,15 +1296,15 @@ def render_script_results(selected_service: str, user_email: str) -> None:
                         st.code(f.raw, language=None)
                         continue
                     hl = rp.highlight(serifs[no - 1], f.quote)
-                    shown = (f"{_esc(hl[0])}<mark style='background:#FDDAD5;padding:0 2px;border-radius:3px;'>{_esc(hl[1])}</mark>{_esc(hl[2])}"
-                             if hl else _esc(f.quote or serifs[no - 1]))
+                    shown = (f"{_md_esc(hl[0])}<mark style='background:#FDDAD5;padding:0 2px;border-radius:3px;'>{_md_esc(hl[1])}</mark>{_md_esc(hl[2])}"
+                             if hl else _md_esc(f.quote or serifs[no - 1]))
                     label = "確認が必要な箇所" if f.kind == "confirm" else "違反箇所"
                     st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>{label}</div><div style='font-size:16px;margin-bottom:.6rem;'>{shown}</div>",
                                 unsafe_allow_html=True)
                     if f.reason:
-                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>理由</div><div>{_esc(f.reason)}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#626B7F;'>理由</div><div>{_md_esc(f.reason)}</div>", unsafe_allow_html=True)
                     if f.reference:
-                        ref = _esc(f.reference)
+                        ref = _md_esc(f.reference)
                         reg = SERVICES[selected_service].get("reg_url", "")
                         link = f"<a href='{_esc_attr(reg)}' target='_blank' style='text-decoration:none;'>{ref} ↗</a>" if reg else ref
                         st.markdown(f"<div style='display:inline-block;margin:.3rem 0 .6rem;padding:2px 12px;border-radius:8px;background:#EFEBFF;color:#4A31C7;font-size:13px;'>{link}</div>",
@@ -1309,7 +1333,7 @@ def render_script_results(selected_service: str, user_email: str) -> None:
                     if not st_item.get("reason"):
                         st.markdown("<span style='color:#B42318;font-size:13px;'>理由を選んでください</span>", unsafe_allow_html=True)
                     need = st_item.get("reason") == "other"
-                    st.text_area("メモ（必須）" if need else "メモ（任意）", key=k + "_m", height=84,
+                    st.text_area("メモ（必須）" if need else "メモ（任意）", key=k + "_m", height=84, max_chars=300,
                                  placeholder="内容を入力（必須）" if need else "補足があれば入力（任意）")
                     if need and not (st_item.get("memo") or "").strip():
                         st.markdown("<span style='color:#B42318;font-size:13px;'>「その他」を選んだ場合は、内容を入力してください</span>", unsafe_allow_html=True)
@@ -1320,15 +1344,15 @@ def render_script_results(selected_service: str, user_email: str) -> None:
         st.caption("台本テキストだけでは判定できない事項です。要修正の件数には含めていません。")
         for no in confirm_nos:
             with st.container(border=True):
-                st.markdown(f"**No.{no}**　{_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                st.markdown(f"**No.{no}**　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
                 for f in parsed[no - 1][1]:
-                    st.markdown(f"▼ {_esc(f.quote)}　{_esc(f.reason)}" if f.quote else f"▼ {_esc(f.reason)}", unsafe_allow_html=True)
+                    st.markdown(f"▼ {_md_esc(f.quote)}　{_md_esc(f.reason)}" if f.quote else f"▼ {_md_esc(f.reason)}", unsafe_allow_html=True)
     if err_nos:
         st.markdown(f"<h3 style='margin:1.5rem 0 .5rem;color:#B42318;'>チェックできなかった項目（{len(err_nos)}件）</h3>", unsafe_allow_html=True)
         st.caption("APIエラー等で判定できませんでした。もう一度チェックを実行してください。")
         for no in err_nos:
             with st.container(border=True):
-                st.markdown(f"**No.{no}**　{_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                st.markdown(f"**No.{no}**　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
                 st.code(results[no - 1], language=None)
 
     # ── 問題なし ──
@@ -1343,7 +1367,7 @@ def render_script_results(selected_service: str, user_email: str) -> None:
                 k = f"fb_{run_id}_{no}"
                 c_no, c_txt, c_btn = st.columns([1, 8, 3])
                 c_no.markdown(f"<span style='color:#626B7F;'>No.{no}</span>", unsafe_allow_html=True)
-                c_txt.markdown(f"<span style='color:#0E6F4F;font-weight:700;'>✓ OK</span>　{_esc(serifs[no - 1])}", unsafe_allow_html=True)
+                c_txt.markdown(f"<span style='color:#0E6F4F;font-weight:700;'>✓ OK</span>　{_md_esc(serifs[no - 1])}", unsafe_allow_html=True)
                 if notes[no - 1]:
                     c_txt.caption(notes[no - 1])
                 if arecs_all[no - 1]:
@@ -1351,7 +1375,7 @@ def render_script_results(selected_service: str, user_email: str) -> None:
                 if FEEDBACK_ENABLED:
                     c_btn.checkbox("見逃しとして報告", key=k + "_x")
                     if st.session_state.get(k + "_x"):
-                        st.text_area("どのレギュレーションに反していますか？（必須）", key=k + "_m", height=72,
+                        st.text_area("どのレギュレーションに反していますか？（必須）", key=k + "_m", height=72, max_chars=300,
                                      placeholder="例：「最安」は根拠の注釈が必要")
                         if not (fb.get(no, {}).get("memo") or "").strip():
                             st.markdown("<span style='color:#B42318;font-size:13px;'>内容を入力してください</span>", unsafe_allow_html=True)
@@ -1363,27 +1387,35 @@ def render_script_results(selected_service: str, user_email: str) -> None:
 
     # ── コピー・CSV ──
     lines, csv_rows = [], []
+    status_label = {rp.OK: "問題なし", rp.NG: "要修正", rp.CONFIRM: "要確認", rp.ERROR: "エラー"}
     for no in range(1, total + 1):
         status, findings = parsed[no - 1]
         s_item = fb.get(no, {})
         if status in (rp.NG, rp.CONFIRM):
             for f in findings:
-                lines.append(f.raw if f.kind != "fix" else f"No.{no} {f.quote} → " + " ／ ".join(f.suggestions) + (f"（{f.reason}）" if f.reason else ""))
+                if f.kind == "fix":
+                    lines.append(f"No.{no} {f.quote} → " + " ／ ".join(f.suggestions) + (f"（{f.reason}）" if f.reason else ""))
+                else:
+                    lines.append(f"No.{no} {f.raw}")
         if s_item.get("v") == "disagree":
             judge = ("見逃しとして報告" if status == rp.OK else "同意しない：" + fbl.REASON_LABEL.get(s_item.get("reason", ""), ""))
         elif s_item.get("v") == "agree":
             judge = "同意"
         else:
             judge = ""
-        f0 = next((f for f in findings if f.kind == "fix"), None)
-        csv_rows.append({
-            "No.": no, "セリフ": serifs[no - 1], "注釈": notes[no - 1],
-            "AI判定": {rp.OK: "問題なし", rp.NG: "要修正", rp.CONFIRM: "要確認", rp.ERROR: "エラー"}[status],
-            "違反箇所": f0.quote if f0 else "", "理由": f0.reason if f0 else "", "参照": f0.reference if f0 else "",
-            "修正案1": f0.suggestions[0] if f0 and len(f0.suggestions) > 0 else "",
-            "修正案2": f0.suggestions[1] if f0 and len(f0.suggestions) > 1 else "",
-            "担当者の判断": judge, "担当者メモ": (s_item.get("memo") or "").strip() if s_item.get("v") == "disagree" else "",
-        })
+        memo = (s_item.get("memo") or "").strip() if s_item.get("v") == "disagree" else ""
+        base = {"No.": no, "セリフ": serifs[no - 1], "注釈": notes[no - 1], "AI判定": status_label[status]}
+        # 指摘ごとに1行（複数の指摘・要確認を取りこぼさない）。担当者の判断は先頭行だけに入れる。
+        rows_for_item = findings if findings else [None]
+        for fi, f in enumerate(rows_for_item):
+            sugg = f.suggestions if f else []
+            csv_rows.append({
+                **base,
+                "違反箇所": (f.quote or "") if f else "", "理由": f.reason if f else "", "参照": f.reference if f else "",
+                "修正案1": sugg[0] if len(sugg) > 0 else "", "修正案2": sugg[1] if len(sugg) > 1 else "",
+                "AIの出力（解析不可の場合）": f.raw if f and f.kind == "raw" else "",
+                "担当者の判断": judge if fi == 0 else "", "担当者メモ": memo if fi == 0 else "",
+            })
     st.divider()
     cc1, cc2 = st.columns([1, 1])
     with cc1:
@@ -1404,7 +1436,9 @@ def render_script_results(selected_service: str, user_email: str) -> None:
     elif is_dirty:
         msg += "　　未保存の変更があります"
     st.markdown(msg)
-    can_save = S["input_count"] > 0 and S["error_count"] == 0 and not is_saved
+    if only_agree:
+        st.caption("「判定に同意」だけの場合は、保存する内容がありません（学習に使うのは「同意しない」のみです）。")
+    can_save = is_dirty
     confirm_key = "fb_confirm_" + run_id
     if st.button("保存済み" if is_saved else "フィードバックを保存", type="primary", disabled=not can_save, key="fb_open_" + run_id):
         st.session_state[confirm_key] = True
@@ -1413,7 +1447,9 @@ def render_script_results(selected_service: str, user_email: str) -> None:
         with st.container(border=True):
             st.markdown("**フィードバックを保存しますか？**")
             st.caption("保存した内容は、次回以降のAI審査に反映されます（全担当者共通）。")
+            n_retract = sum(1 for r in pending_rows if r["verdict"] == "retract")
             st.markdown(f"- 判定に同意：{S['agree']}件（学習には使用しません）\n- 同意しない：{S['disagree']}件"
+                        + (f"\n- 保存済みの「同意しない」の取り消し：{n_retract}件" if n_retract else "")
                         + (f"\n- 担当者の判断（要修正）：{S['final_count']}件（AI判定は{S['ai_count']}件）" if S["has_override"] else ""))
             b1, b2, _ = st.columns([1, 1, 4])
             if b1.button("保存する", type="primary", key="fb_do_" + run_id):
@@ -1503,13 +1539,13 @@ def show_admin_dashboard() -> None:
 
     S = dl.summarize(df, USD_JPY)
 
-    if S["has_old_logic"] and not st.session_state.get("dash_hide_banner"):
+    if S["has_old_logic"] and st.session_state.get("dash_hide_banner") != (start, end):
         _cb, _cx = st.columns([12, 1])
         with _cb:
             st.warning("選択期間には旧ロジック（キャッシュトークン未計上）のデータが含まれています。コスト合計は実際より低く表示される場合があります。")
         with _cx:
             if st.button("✕", key="dash_close_banner", help="閉じる"):
-                st.session_state["dash_hide_banner"] = True
+                st.session_state["dash_hide_banner"] = (start, end)
                 st.rerun()
 
     legacy_note = f"旧ログ{S['legacy_runs']}回は含まず" if S["legacy_runs"] else "&nbsp;"

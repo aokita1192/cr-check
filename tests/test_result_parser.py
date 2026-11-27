@@ -47,6 +47,23 @@ def test_unparseable_is_raw_and_ng():
     assert st == rp.NG and len(f) == 1                                   # 警告行は指摘にしない
 
 
+def test_confirm_with_fullwidth_paren_quote():
+    # プロンプトの書式どおり ▼要確認：（原文引用）（内容）
+    st, f = rp.parse_result("▼要確認：（最安）（根拠の注釈が必要か確認）")
+    assert st == rp.CONFIRM and f[0].quote == "最安" and f[0].reason == "根拠の注釈が必要か確認"
+    _, f = rp.parse_result("▼要確認：最安（根拠の確認）")
+    assert f[0].quote == "最安" and f[0].reason == "根拠の確認"
+    _, f = rp.parse_result("▼要確認：内容だけ")
+    assert f[0].quote == "" and f[0].reason == "内容だけ"
+
+
+def test_nested_parentheses_in_reason():
+    _, f = rp.parse_result("「A → 案1：B案2：C（理由（補足））」")
+    assert f[0].suggestions == ["B", "C"] and f[0].reason == "理由（補足）"
+    _, f = rp.parse_result("「A → 案1：B案2：C（理由（補足））【参照：項目（注）】」")
+    assert f[0].reason == "理由（補足）" and f[0].reference == "項目（注）"
+
+
 def test_highlight():
     assert rp.highlight("比較した中で1番安い見積もりがわかる。", "見積もり") == ("比較した中で1番安い", "見積もり", "がわかる。")
     assert rp.highlight("abc", "xyz") is None and rp.highlight("abc", "") is None

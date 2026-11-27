@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 OK, NG, CONFIRM, ERROR = "ok", "ng", "confirm", "error"
 
 _REF_RE = re.compile(r"【参照[:：]\s*([^】]*)】\s*$")
-_REASON_RE = re.compile(r"[（(]([^（）()]*)[）)]\s*$")
 _ALT_RE = re.compile(r"案1[:：]\s*(.*?)\s*案2[:：]\s*(.*)$", re.S)
 
 
@@ -38,13 +37,37 @@ def is_error(text: str) -> bool:
     return t.startswith("[APIエラー") or t.startswith("[レスポンスなし")
 
 
+def _split_trailing_paren(s: str) -> tuple[str, str]:
+    """末尾の（…）を、入れ子を考慮して (前の部分, 括弧の中身) に分ける。無ければ (s, "")。"""
+    s = s.rstrip()
+    if not s or s[-1] not in "）)":
+        return s, ""
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        c = s[i]
+        if c in "）)":
+            depth += 1
+        elif c in "（(":
+            depth -= 1
+            if depth == 0:
+                return s[:i].rstrip(), s[i + 1:-1].strip()
+    return s, ""
+
+
+def _unwrap_quote(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and ((s[0] == "「" and s[-1] == "」") or (s[0] in "（(" and s[-1] in "）)")):
+        return s[1:-1].strip()
+    return s
+
+
 def parse_line(line: str) -> Finding:
     s = line.strip()
     if s.startswith("▼要確認"):
         body = s.split("：", 1)[1].strip() if "：" in s else s
-        m = re.match(r"^「?(.*?)」?\s*[（(](.*)[）)]\s*$", body, re.S)
-        if m:
-            return Finding("confirm", quote=m.group(1).strip(), reason=m.group(2).strip(), raw=s)
+        head, reason = _split_trailing_paren(body)
+        if reason:
+            return Finding("confirm", quote=_unwrap_quote(head), reason=reason, raw=s)
         return Finding("confirm", reason=body, raw=s)
 
     if not (s.startswith("「") and s.endswith("」")):
@@ -61,11 +84,7 @@ def parse_line(line: str) -> Finding:
         ref = m.group(1).strip()
         rest = rest[: m.start()].rstrip()
 
-    reason = ""
-    m = _REASON_RE.search(rest)
-    if m:
-        reason = m.group(1).strip()
-        rest = rest[: m.start()].rstrip()
+    rest, reason = _split_trailing_paren(rest)
 
     m = _ALT_RE.match(rest)
     if m:
