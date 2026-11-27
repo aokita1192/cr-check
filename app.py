@@ -194,9 +194,6 @@ CACHE_WRITE_5M_PRICE_PER_1M_USD = 2.50   # ephemeral 5-minute cache write
 CACHE_WRITE_1H_PRICE_PER_1M_USD = 4.00   # ephemeral 1-hour cache write
 CACHE_READ_PRICE_PER_1M_USD     = 0.20
 
-# Keep old name as alias for dashboard display
-CACHE_WRITE_PRICE_PER_1M_USD = CACHE_WRITE_5M_PRICE_PER_1M_USD
-
 
 def _detect_env() -> str:
     # Streamlit Cloud sets STREAMLIT_SHARING_MODE=streamlit
@@ -693,13 +690,9 @@ def load_usage_log() -> pd.DataFrame:
             if col not in df.columns:
                 df[col] = 0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-        if "cost_usd" in df.columns:
-            df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
-        # Mark rows written by old logging logic (missing new columns)
-        if "total_input_tokens" in df.columns:
-            df["is_legacy"] = df["total_input_tokens"] == 0
-        else:
-            df["is_legacy"] = True
+        if "cost_usd" not in df.columns:
+            df["cost_usd"] = 0.0
+        df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
         return df
     except Exception:
         return pd.DataFrame()
